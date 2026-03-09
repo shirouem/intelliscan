@@ -1,0 +1,100 @@
+.app-main {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+
+.app-header {
+    padding: 1.5rem 2rem;
+    background: hsla(var(--bg-secondary) / 0.8);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid hsla(0, 0%, 100%, 0.05);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.header-content {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.logo-wrapper {
+    width: 48px;
+    height: 48px;
+    border-radius: var(--radius-md);
+    background: linear-gradient(135deg, hsl(var(--accent-primary)), hsl(var(--accent-primary) / 0.5));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: var(--shadow-glow);
+}
+
+.logo-icon {
+    width: 24px;
+    height: 24px;
+    border: 2px solid white;
+    border-radius: 4px;
+    position: relative;
+}
+
+.logo-icon::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: -2px;
+    right: -2px;
+    height: 2px;
+    background: white;
+    transform: translateY(-50%);
+    animation: scan 2s ease-in-out infinite;
+}
+
+@keyframes scan {
+    0% {
+        transform: translateY(-10px);
+    }
+
+    50% {
+        transform: translateY(10px);
+    }
+
+    100% {
+        transform: translateY(-10px);
+    }
+}
+
+.app-header h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    background: linear-gradient(to right, #fff, hsl(var(--text-secondary)));
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.subtitle {
+    font-size: 0.875rem;
+    color: hsl(var(--text-muted));
+    font-weight: 500;
+}
+
+.app-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    max-width: 1200px;
+    margin: 0 auto;
+    width: 100%;
+    padding: 2rem;
+}
+
+@media (max-width: 768px) {
+    .app-content {
+        padding: 1rem;
+    }
+}
