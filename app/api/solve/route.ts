@@ -17,15 +17,17 @@ export async function POST(req: NextRequest) {
 
     try {
         const body = await req.json();
-        const { questions } = body;
+        const { questions, customSolvePrompt } = body;
 
         if (!questions || !Array.isArray(questions) || questions.length === 0) {
             return NextResponse.json({ error: "No questions provided." }, { status: 400 });
         }
 
-        const prompt = `
-        You are an expert tutor. I am providing you with an array of questions extracted from a question paper.
-        Please solve each question accurately and provide a clear, step-by-step solution.
+        const systemPrompt = customSolvePrompt && customSolvePrompt.trim().length > 0
+            ? customSolvePrompt
+            : `You are an expert tutor. I am providing you with an array of questions extracted from a question paper.\nPlease solve each question accurately and provide a clear, step-by-step solution.`;
+
+        const prompt = `${systemPrompt}
         
         Return your answer as a raw strict JSON object ONLY. 
         The keys of the JSON object must correspond to the exact 'id' of each provided question, and the value should be the string containing your detailed solution.

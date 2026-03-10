@@ -22,6 +22,11 @@ export default function ScannerApp() {
     const [expandedSolutionIds, setExpandedSolutionIds] = useState<Set<string>>(new Set());
     const [activeTab, setActiveTab] = useState<"all" | "unsolved" | "solved">("all");
 
+    // Settings state
+    const defaultSolvePrompt = "You are an expert tutor. I am providing you with an array of questions extracted from a question paper.\nPlease solve each question accurately and provide a clear, step-by-step solution.";
+    const [customSolvePrompt, setCustomSolvePrompt] = useState(defaultSolvePrompt);
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
     // Edit mode state
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editingText, setEditingText] = useState("");
@@ -41,11 +46,9 @@ export default function ScannerApp() {
         if (stored) {
             try {
                 const parsed: ScannedQuestion[] = JSON.parse(stored);
-                // Sanitize legacy duplicate IDs (from before the patch) 
                 const seenIds = new Set<string>();
                 const sanitized = parsed.map((q) => {
                     let uniqueId = q.id;
-                    // If the ID is missing, duplicated, or suspiciously short (like "q1" from the API), force a new one
                     if (!uniqueId || seenIds.has(uniqueId) || uniqueId.length < 5) {
                         uniqueId = `q-rec-${Math.random().toString(36).substring(2, 10)}`;
                     }
@@ -57,6 +60,12 @@ export default function ScannerApp() {
                 console.error("Failed to load saved questions", e);
             }
         }
+
+        const storedPrompt = localStorage.getItem("scannerApp_solvePrompt");
+        if (storedPrompt) {
+            setCustomSolvePrompt(storedPrompt);
+        }
+
         setIsLoaded(true);
         setMounted(true);
     }, []);
@@ -65,8 +74,9 @@ export default function ScannerApp() {
     useEffect(() => {
         if (isLoaded) {
             localStorage.setItem("scannerApp_savedQuestions", JSON.stringify(savedQuestions));
+            localStorage.setItem("scannerApp_solvePrompt", customSolvePrompt);
         }
-    }, [savedQuestions, isLoaded]);
+    }, [savedQuestions, customSolvePrompt, isLoaded]);
 
     const videoConstraints = {
         width: { ideal: 1920 },
@@ -309,7 +319,10 @@ export default function ScannerApp() {
             const response = await fetch("/api/solve", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ questions: questionsToSend }),
+                body: JSON.stringify({
+                    questions: questionsToSend,
+                    customSolvePrompt: customSolvePrompt
+                }),
             });
 
             if (!response.ok) {
@@ -423,8 +436,44 @@ export default function ScannerApp() {
                             disabled={scanStatus === "scanning" || countdown !== null}
                         />
                     </div>
+
+                    <button
+                        className="settings-btn"
+                        onClick={() => setIsSettingsOpen(true)}
+                        title="Settings"
+                    >
+                        ⚙️ Settings
+                    </button>
                 </div>
             </div>
+
+            {/* Settings Overlay */}
+            {isSettingsOpen && (
+                <div className="settings-overlay" onClick={() => setIsSettingsOpen(false)}>
+                    <div className="settings-modal" onClick={e => e.stopPropagation()}>
+                        <div className="settings-header">
+                            <h3>Settings</h3>
+                            <button className="close-btn" onClick={() => setIsSettingsOpen(false)}>✕</button>
+                        </div>
+                        <div className="settings-content">
+                            <label className="settings-label">
+                                AI Solve System Prompt
+                                <span className="settings-hint">The JSON formatting instructions will be appended automatically.</span>
+                            </label>
+                            <textarea
+                                className="settings-textarea"
+                                value={customSolvePrompt}
+                                onChange={(e) => setCustomSolvePrompt(e.target.value)}
+                                placeholder={defaultSolvePrompt}
+                            />
+                            <div className="settings-actions">
+                                <button className="reset-btn" onClick={() => setCustomSolvePrompt(defaultSolvePrompt)}>Reset Default</button>
+                                <button className="process-btn" onClick={() => setIsSettingsOpen(false)}>Done</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Right side: Results */}
             <div className="results-section">
