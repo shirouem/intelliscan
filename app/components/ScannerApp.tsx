@@ -152,12 +152,26 @@ export default function ScannerApp() {
                 const updatedList = [...prev];
 
                 newQuestions.forEach(newQ => {
-                    // Check if question number already exists
-                    const exists = updatedList.some(
-                        existingQ => String(existingQ.questionNumber).trim() === String(newQ.questionNumber).trim()
+                    // Create a normalized string of the first ~25 alphanumeric characters for comparison
+                    const getLexicalPrefix = (str: string) => str.replace(/[^a-zA-Z0-9]/g, '').toLowerCase().substring(0, 25);
+                    const newPrefix = getLexicalPrefix(newQ.text || "");
+
+                    // Check if question text is extremely similar (meaning it has the same prefix)
+                    const isSimilar = updatedList.some(
+                        existingQ => {
+                            const existingPrefix = getLexicalPrefix(existingQ.text || "");
+                            // Return true if either prefix is entirely contained within the other
+                            // and the prefix is at least 15 characters long to prevent false positives on very short questions
+                            const minLength = Math.min(newPrefix.length, existingPrefix.length);
+                            if (minLength < 15) {
+                                // For very short text, require a high degree of similarity or exact match
+                                return newPrefix === existingPrefix && newPrefix.length > 5;
+                            }
+                            return newPrefix.startsWith(existingPrefix) || existingPrefix.startsWith(newPrefix);
+                        }
                     );
 
-                    if (!exists) {
+                    if (!isSimilar) {
                         updatedList.push({
                             ...newQ,
                             // Ignore the ID from the API because if we scan twice, it might return 'id: 1' both times
