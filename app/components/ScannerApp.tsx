@@ -166,13 +166,8 @@ export default function ScannerApp() {
                     }
                 });
 
-                // Sort by question number if they look like numbers
-                return updatedList.sort((a, b) => {
-                    const numA = parseInt(a.questionNumber.replace(/\D/g, ''), 10);
-                    const numB = parseInt(b.questionNumber.replace(/\D/g, ''), 10);
-                    if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
-                    return a.questionNumber.localeCompare(b.questionNumber);
-                });
+                // Return the updated list in the exact order items were processed
+                return updatedList;
             });
 
             setScanStatus("success");
@@ -312,9 +307,12 @@ export default function ScannerApp() {
         ));
 
         try {
-            const questionsToSend = savedQuestions
-                .filter(q => selectedQuestionIds.has(q.id))
-                .map(q => ({ id: q.id, text: q.text }));
+            const questionsToSend = Array.from(selectedQuestionIds)
+                .map(id => {
+                    const q = savedQuestions.find(sq => sq.id === id);
+                    return q ? { id: q.id, text: q.text } : null;
+                })
+                .filter(Boolean);
 
             const response = await fetch("/api/solve", {
                 method: "POST",
