@@ -86,8 +86,8 @@ export default function ScannerApp() {
     }, [savedQuestions, customSolvePrompt, isLoaded]);
 
     const videoConstraints = {
-        width: { ideal: 3840 },
-        height: { ideal: 2160 },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
         facingMode: "user" // specifically requested front camera
     };
 
@@ -354,7 +354,7 @@ export default function ScannerApp() {
                 ctx.drawImage(img, 0, 0);
                 base64Image = canvas.toDataURL("image/jpeg");
             }
-        } catch (_) {}
+        } catch (_) { }
 
         setImageSolveStatus("solving");
 
@@ -384,7 +384,7 @@ export default function ScannerApp() {
         if (imageSolveCountdown === null) return;
         if (imageSolveCountdown > 0) {
             const timer = setTimeout(() => setImageSolveCountdown(imageSolveCountdown - 1), 1000);
-            try { if ("vibrate" in navigator) navigator.vibrate(50); } catch (_) {}
+            try { if ("vibrate" in navigator) navigator.vibrate(50); } catch (_) { }
             return () => clearTimeout(timer);
         } else {
             setImageSolveCountdown(null);
@@ -555,9 +555,8 @@ export default function ScannerApp() {
                     ) : (
                         <>
                             <button
-                                className={`capture-btn image-solve-btn ${
-                                    imageSolveStatus === 'solving' || imageSolveStatus === 'capturing' || imageSolveCountdown !== null ? 'counting' : ''
-                                }`}
+                                className={`capture-btn image-solve-btn ${imageSolveStatus === 'solving' || imageSolveStatus === 'capturing' || imageSolveCountdown !== null ? 'counting' : ''
+                                    }`}
                                 onClick={startImageSolve}
                                 disabled={imageSolveStatus === 'solving' || imageSolveStatus === 'capturing' || imageSolveCountdown !== null}
                             >
