@@ -5,6 +5,8 @@ if (typeof (globalThis as any).geminiKeyIndex === "undefined") {
     (globalThis as any).geminiKeyIndex = 0;
 }
 
+export const maxDuration = 120; // 2 minutes
+
 export async function POST(req: NextRequest) {
     try {
         const body = await req.json();

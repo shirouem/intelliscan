@@ -38,6 +38,8 @@ async function solveWithGeminiAPI(imageBase64: string, prompt: string): Promise<
     return text;
 }
 
+export const maxDuration = 120; // 2 minutes
+
 export async function POST(req: NextRequest) {
     try {
         const body = await req.json();
@@ -58,7 +60,7 @@ export async function POST(req: NextRequest) {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ image, prompt: solvePrompt }),
-                signal: AbortSignal.timeout(50_000),
+                signal: AbortSignal.timeout(120_000),
             });
 
             if (browserRes.ok) {
