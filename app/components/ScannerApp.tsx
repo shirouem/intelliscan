@@ -86,8 +86,8 @@ export default function ScannerApp() {
     }, [savedQuestions, customSolvePrompt, isLoaded]);
 
     const videoConstraints = {
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
+        width: { ideal: 3840 },
+        height: { ideal: 2160 },
         facingMode: "user" // specifically requested front camera
     };
 
