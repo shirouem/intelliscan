@@ -5,7 +5,7 @@ if (typeof (globalThis as any).geminiKeyIndex === "undefined") {
     (globalThis as any).geminiKeyIndex = 0;
 }
 
-export const maxDuration = 480; // 8 minutes
+export const maxDuration = 60; // 60 seconds (Vercel max for many plans)
 
 export async function POST(req: NextRequest) {
     const rawKeys = process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || "";

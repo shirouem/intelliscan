@@ -38,7 +38,7 @@ async function solveWithGeminiAPI(imageBase64: string, prompt: string): Promise<
     return text;
 }
 
-export const maxDuration = 480; // 8 minutes
+export const maxDuration = 60; // 60 seconds (Vercel max for many plans)
 
 export async function POST(req: NextRequest) {
     try {
