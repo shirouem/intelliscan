@@ -23,6 +23,30 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ error: "No questions provided." }, { status: 400 });
         }
 
+        // --- BROWSER BACKEND SERVICE INTEGRATION ---
+        try {
+            const browserServiceUrl = process.env.BROWSER_SERVICE_URL || 'http://localhost:3001';
+            console.log(`[Solve API] Attempting to use primary Browser Backend Service at ${browserServiceUrl}...`);
+            const browserServiceRes = await fetch(`${browserServiceUrl}/solve`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ questions })
+            });
+
+            if (browserServiceRes.ok) {
+                const browserData = await browserServiceRes.json();
+                if (browserData.solutions) {
+                    console.log("[Solve API] Browser Backend Service succeeded.");
+                    return NextResponse.json({ solutions: browserData.solutions });
+                }
+            } else {
+                console.warn(`[Solve API] Browser service returned status: ${browserServiceRes.status}`);
+            }
+        } catch (browserError: any) {
+            console.warn("[Solve API] Browser Backend Service failed, falling back to Gemini models:", browserError.message);
+        }
+        // --- END BROWSER BACKEND SERVICE INTEGRATION ---
+
         const systemPrompt = customSolvePrompt && customSolvePrompt.trim().length > 0
             ? customSolvePrompt
             : `You are an expert tutor. I am providing you with an array of questions extracted from a question paper.\nPlease solve each question accurately and provide a clear, step-by-step solution.`;
@@ -39,7 +63,7 @@ export async function POST(req: NextRequest) {
 
         const modelsToTry = [
             "gemini-3.0-flash-preview",
-            "gemini-3.1-flash-lite-preview",
+            "gemini-3.1-flash-lite",
             "gemini-2.5-flash"
         ];
 
