@@ -218,18 +218,6 @@ export default function ScannerApp() {
         }
     }, [countdown, capture]);
 
-    // Countdown for Image Solve mode
-    useEffect(() => {
-        if (imageSolveCountdown === null) return;
-        if (imageSolveCountdown > 0) {
-            const timer = setTimeout(() => setImageSolveCountdown(imageSolveCountdown - 1), 1000);
-            try { if ("vibrate" in navigator) navigator.vibrate(50); } catch (_) {}
-            return () => clearTimeout(timer);
-        } else {
-            setImageSolveCountdown(null);
-            captureAndImageSolve();
-        }
-    }, [imageSolveCountdown, captureAndImageSolve]);
 
     const startManualScan = () => {
         if (scanStatus === "scanning" || countdown !== null) return;
@@ -390,6 +378,20 @@ export default function ScannerApp() {
             setImageSolveStatus("error");
         }
     }, [webcamRef, imageSolveStatus, customSolvePrompt]);
+
+    // Countdown for Image Solve mode
+    useEffect(() => {
+        if (imageSolveCountdown === null) return;
+        if (imageSolveCountdown > 0) {
+            const timer = setTimeout(() => setImageSolveCountdown(imageSolveCountdown - 1), 1000);
+            try { if ("vibrate" in navigator) navigator.vibrate(50); } catch (_) {}
+            return () => clearTimeout(timer);
+        } else {
+            setImageSolveCountdown(null);
+            captureAndImageSolve();
+        }
+    }, [imageSolveCountdown, captureAndImageSolve]);
+
 
     const processSelectedQuestions = async () => {
         if (selectedQuestionIds.size === 0 || isProcessingSolutions) return;
