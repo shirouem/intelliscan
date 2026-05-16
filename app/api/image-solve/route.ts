@@ -15,13 +15,13 @@ async function solveWithGeminiAPI(imageBase64: string, prompt: string): Promise<
     const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, "");
 
     const keyIndex = (globalThis as any).imageSolveKeyIndex % apiKeys.length;
-    const apiKey   = apiKeys[keyIndex];
+    const apiKey = apiKeys[keyIndex];
     (globalThis as any).imageSolveKeyIndex = (keyIndex + 1) % apiKeys.length;
 
     const ai = new GoogleGenAI({ apiKey });
 
     const response = await ai.models.generateContent({
-        model: "gemini-2.0-flash",
+        model: "gemini-3.0-flash-preview",
         contents: [
             {
                 role: "user",

@@ -475,6 +475,8 @@ export default function ScannerApp() {
                         audio={false}
                         ref={webcamRef}
                         screenshotFormat="image/jpeg"
+                        screenshotQuality={1}
+                        forceScreenshotSourceSize={true}
                         videoConstraints={videoConstraints}
                         className={`webcam-preview ${isCapturing ? "capture-flash" : ""}`}
                         mirrored={true} // Usually better UX for front camera
