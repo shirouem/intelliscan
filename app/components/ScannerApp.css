@@ -747,3 +747,91 @@
     gap: 1rem;
     margin-top: 0.5rem;
 }
+
+/* ── Solve Mode Toggle ──────────────────────────────────────────────────────── */
+.solve-mode-toggle {
+    display: flex;
+    gap: 0.25rem;
+    background: hsla(0, 0%, 100%, 0.05);
+    border: 1px solid hsla(0, 0%, 100%, 0.1);
+    border-radius: var(--radius-full);
+    padding: 0.25rem;
+    margin-bottom: 0.25rem;
+}
+
+.mode-btn {
+    flex: 1;
+    padding: 0.4rem 0.9rem;
+    border-radius: var(--radius-full);
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: hsl(var(--text-secondary));
+    background: transparent;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+
+.mode-btn:hover {
+    color: hsl(var(--text-primary));
+    background: hsla(0, 0%, 100%, 0.08);
+}
+
+.mode-btn.active {
+    background: hsla(var(--accent-primary) / 0.2);
+    color: hsl(var(--accent-primary));
+    border: 1px solid hsla(var(--accent-primary) / 0.4);
+    box-shadow: 0 0 12px hsla(var(--accent-primary) / 0.2);
+}
+
+/* Image Solve button variant (purple tint) */
+.capture-btn.image-solve-btn {
+    border-color: hsl(var(--accent-secondary));
+    box-shadow: 0 0 20px hsl(var(--accent-secondary) / 0.3);
+}
+
+.capture-btn.image-solve-btn .capture-inner {
+    background: linear-gradient(135deg, hsl(var(--accent-primary) / 0.15), hsl(var(--accent-secondary) / 0.15));
+}
+
+.capture-btn.image-solve-btn:hover:not(:disabled) {
+    box-shadow: 0 0 30px hsl(var(--accent-secondary) / 0.5);
+}
+
+/* ── Image Solve Answer Panel ───────────────────────────────────────────────── */
+.image-solve-result {
+    width: 100%;
+    max-height: 260px;
+    display: flex;
+    flex-direction: column;
+    background: hsla(var(--bg-tertiary) / 0.6);
+    border: 1px solid hsla(var(--accent-secondary) / 0.3);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    animation: fadeInSlide 0.35s ease forwards;
+    box-shadow: 0 4px 20px hsla(var(--accent-secondary) / 0.15);
+}
+
+.image-solve-result-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.6rem 1rem;
+    background: hsla(var(--accent-secondary) / 0.12);
+    border-bottom: 1px solid hsla(var(--accent-secondary) / 0.2);
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: hsl(var(--accent-secondary));
+    flex-shrink: 0;
+}
+
+.image-solve-result-body {
+    padding: 0.9rem 1rem;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    color: hsl(var(--text-primary));
+    white-space: pre-wrap;
+    overflow-y: auto;
+    flex: 1;
+}

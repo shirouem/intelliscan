@@ -37,6 +37,12 @@ export default function ScannerApp() {
     const [countdown, setCountdown] = useState<number | null>(null);
     const [captureDelay, setCaptureDelay] = useState(6);
 
+    // ── Image Solve mode ──────────────────────────────────────────────────────
+    const [imageSolveMode, setImageSolveMode] = useState(false);
+    const [imageSolveStatus, setImageSolveStatus] = useState<"idle" | "capturing" | "solving" | "done" | "error">("idle");
+    const [imageSolveAnswer, setImageSolveAnswer] = useState<string | null>(null);
+    const [imageSolveError, setImageSolveError] = useState<string | null>(null);
+
     // Mounted state to avoid hydration errors with Webcam
     const [mounted, setMounted] = useState(false);
     const [isLoaded, setIsLoaded] = useState(false);
@@ -310,6 +316,62 @@ export default function ScannerApp() {
         setEditingText("");
     };
 
+    // ── Image Solve: capture frame → /api/image-solve → show answer ──────────
+    const captureAndImageSolve = useCallback(async () => {
+        if (!webcamRef.current || imageSolveStatus === "solving" || imageSolveStatus === "capturing") return;
+
+        setImageSolveStatus("capturing");
+        setImageSolveAnswer(null);
+        setImageSolveError(null);
+
+        const imageSrc = webcamRef.current.getScreenshot();
+        if (!imageSrc) {
+            setImageSolveStatus("error");
+            setImageSolveError("Failed to capture image from camera.");
+            return;
+        }
+
+        // Flip the image (same as normal scan)
+        let base64Image = imageSrc;
+        try {
+            const img = new window.Image();
+            img.src = imageSrc;
+            await new Promise((r) => { img.onload = r; });
+            const canvas = document.createElement("canvas");
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext("2d");
+            if (ctx) {
+                ctx.translate(canvas.width, 0);
+                ctx.scale(-1, 1);
+                ctx.drawImage(img, 0, 0);
+                base64Image = canvas.toDataURL("image/jpeg");
+            }
+        } catch (_) {}
+
+        setImageSolveStatus("solving");
+
+        try {
+            const response = await fetch("/api/image-solve", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ image: base64Image }),
+            });
+
+            const data = await response.json();
+
+            if (!response.ok || data.error) {
+                throw new Error(data.error || `Server returned ${response.status}`);
+            }
+
+            setImageSolveAnswer(data.answer || "(No answer returned)");
+            setImageSolveStatus("done");
+        } catch (err: any) {
+            setImageSolveError(err.message || "Image solve failed.");
+            setImageSolveStatus("error");
+        }
+    }, [webcamRef, imageSolveStatus]);
+
     const processSelectedQuestions = async () => {
         if (selectedQuestionIds.size === 0 || isProcessingSolutions) return;
 
@@ -421,33 +483,88 @@ export default function ScannerApp() {
                 </div>
 
                 <div className="controls">
-                    <button
-                        className={`capture-btn ${countdown !== null ? 'counting' : ''}`}
-                        onClick={startManualScan}
-                        disabled={scanStatus === "scanning" || countdown !== null}
-                    >
-                        <div className="capture-inner"></div>
-                    </button>
-                    <p className="instruction-text" style={{ marginTop: '0.5rem', marginBottom: '1.5rem' }}>
-                        {countdown !== null
-                            ? "Position paper. Capturing soon..."
-                            : `Tap to start ${captureDelay}-second scan timer`}
-                    </p>
-
-                    <div className="delay-slider-container">
-                        <label className="delay-label">
-                            Capture Delay: <span>{captureDelay}s</span>
-                        </label>
-                        <input
-                            type="range"
-                            min="1"
-                            max="20"
-                            value={captureDelay}
-                            onChange={(e) => setCaptureDelay(parseInt(e.target.value))}
-                            className="delay-slider"
-                            disabled={scanStatus === "scanning" || countdown !== null}
-                        />
+                    {/* Mode toggle */}
+                    <div className="solve-mode-toggle">
+                        <button
+                            className={`mode-btn ${!imageSolveMode ? 'active' : ''}`}
+                            onClick={() => { setImageSolveMode(false); setImageSolveStatus('idle'); }}
+                        >
+                            📄 Scan Mode
+                        </button>
+                        <button
+                            className={`mode-btn ${imageSolveMode ? 'active' : ''}`}
+                            onClick={() => { setImageSolveMode(true); setImageSolveStatus('idle'); }}
+                        >
+                            🧠 Image Solve
+                        </button>
                     </div>
+
+                    {!imageSolveMode ? (
+                        <>
+                            <button
+                                className={`capture-btn ${countdown !== null ? 'counting' : ''}`}
+                                onClick={startManualScan}
+                                disabled={scanStatus === "scanning" || countdown !== null}
+                            >
+                                <div className="capture-inner"></div>
+                            </button>
+                            <p className="instruction-text" style={{ marginTop: '0.5rem', marginBottom: '1.5rem' }}>
+                                {countdown !== null
+                                    ? "Position paper. Capturing soon..."
+                                    : `Tap to start ${captureDelay}-second scan timer`}
+                            </p>
+
+                            <div className="delay-slider-container">
+                                <label className="delay-label">
+                                    Capture Delay: <span>{captureDelay}s</span>
+                                </label>
+                                <input
+                                    type="range"
+                                    min="1"
+                                    max="20"
+                                    value={captureDelay}
+                                    onChange={(e) => setCaptureDelay(parseInt(e.target.value))}
+                                    className="delay-slider"
+                                    disabled={scanStatus === "scanning" || countdown !== null}
+                                />
+                            </div>
+                        </>
+                    ) : (
+                        <>
+                            <button
+                                className={`capture-btn image-solve-btn ${
+                                    imageSolveStatus === 'solving' || imageSolveStatus === 'capturing' ? 'counting' : ''
+                                }`}
+                                onClick={captureAndImageSolve}
+                                disabled={imageSolveStatus === 'solving' || imageSolveStatus === 'capturing'}
+                            >
+                                <div className="capture-inner"></div>
+                            </button>
+                            <p className="instruction-text" style={{ marginTop: '0.5rem', marginBottom: '1rem' }}>
+                                {imageSolveStatus === 'capturing' && 'Capturing image...'}
+                                {imageSolveStatus === 'solving' && '🧠 Sending to Gemini via browser...'}
+                                {imageSolveStatus === 'done' && '✅ Answer received!'}
+                                {imageSolveStatus === 'error' && '❌ ' + imageSolveError}
+                                {imageSolveStatus === 'idle' && 'Tap to capture & solve with Gemini'}
+                            </p>
+
+                            {/* Answer panel */}
+                            {imageSolveStatus === 'done' && imageSolveAnswer && (
+                                <div className="image-solve-result">
+                                    <div className="image-solve-result-header">
+                                        <span>🧠 Gemini Answer</span>
+                                        <button
+                                            className="delete-btn"
+                                            onClick={() => { setImageSolveStatus('idle'); setImageSolveAnswer(null); }}
+                                        >✕</button>
+                                    </div>
+                                    <div className="image-solve-result-body">
+                                        {imageSolveAnswer}
+                                    </div>
+                                </div>
+                            )}
+                        </>
+                    )}
 
                     <button
                         className="settings-btn"
