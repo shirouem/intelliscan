@@ -68,6 +68,9 @@ export async function POST(req: NextRequest) {
                 if (data.answer) {
                     console.log("[image-solve] ✅ Browser service succeeded.");
                     return NextResponse.json({ answer: data.answer, source: "browser" });
+                } else if (data.jobId) {
+                    console.log("[image-solve] Browser service queued job:", data.jobId);
+                    return NextResponse.json({ jobId: data.jobId, source: "browser" });
                 }
             } else {
                 const errData = await browserRes.json().catch(() => ({}));

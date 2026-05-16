@@ -371,8 +371,32 @@ export default function ScannerApp() {
                 throw new Error(data.error || `Server returned ${response.status}`);
             }
 
-            setImageSolveAnswer(data.answer || "(No answer returned)");
-            setImageSolveStatus("done");
+            if (data.jobId) {
+                // Poll for status
+                const pollInterval = setInterval(async () => {
+                    try {
+                        const statusRes = await fetch(`/api/image-solve/status?jobId=${data.jobId}`);
+                        if (!statusRes.ok) return; // ignore temporary network errors
+                        const statusData = await statusRes.json();
+                        
+                        if (statusData.status === 'done') {
+                            clearInterval(pollInterval);
+                            setImageSolveAnswer(statusData.answer || "(No answer returned)");
+                            setImageSolveStatus("done");
+                        } else if (statusData.status === 'error') {
+                            clearInterval(pollInterval);
+                            setImageSolveError(statusData.error || "Image solve failed.");
+                            setImageSolveStatus("error");
+                        }
+                    } catch (e: any) {
+                        console.error("Polling error:", e);
+                    }
+                }, 3000);
+            } else {
+                // Fallback direct answer (e.g., from Gemini API)
+                setImageSolveAnswer(data.answer || "(No answer returned)");
+                setImageSolveStatus("done");
+            }
         } catch (err: any) {
             setImageSolveError(err.message || "Image solve failed.");
             setImageSolveStatus("error");
