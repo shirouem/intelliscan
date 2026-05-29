@@ -103,26 +103,28 @@ export default function ScannerApp() {
         ],
     };
 
-    const captureHighQualityFrame = useCallback(async () => {
-        if (!webcamRef.current) return null;
+    const dataUrlFromBlob = (blob: Blob) => new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+    });
 
-        const imageSrc = webcamRef.current.getScreenshot();
-        if (!imageSrc) return null;
-
+    const loadImage = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
         const img = new window.Image();
-        img.src = imageSrc;
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = src;
+    });
 
-        await new Promise((resolve, reject) => {
-            img.onload = resolve;
-            img.onerror = reject;
-        });
-
+    const flipImageSource = async (src: string) => {
+        const img = await loadImage(src);
         const canvas = document.createElement("canvas");
         canvas.width = img.naturalWidth || img.width;
         canvas.height = img.naturalHeight || img.height;
         const ctx = canvas.getContext("2d", { alpha: false });
 
-        if (!ctx) return imageSrc;
+        if (!ctx) return src;
 
         ctx.imageSmoothingEnabled = false;
         ctx.translate(canvas.width, 0);
@@ -130,7 +132,70 @@ export default function ScannerApp() {
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
         return canvas.toDataURL(captureMimeType, captureImageQuality);
+    };
+
+    const captureHighQualityFrame = useCallback(async () => {
+        const video = webcamRef.current?.video;
+        if (!video) return null;
+
+        const stream = video.srcObject as MediaStream | null;
+        const track = stream?.getVideoTracks?.()[0];
+        const ImageCaptureCtor = (window as any).ImageCapture;
+
+        if (track && ImageCaptureCtor) {
+            try {
+                const imageCapture = new ImageCaptureCtor(track);
+                const blob = await imageCapture.takePhoto();
+                const stillPhoto = await dataUrlFromBlob(blob);
+                const flippedStillPhoto = await flipImageSource(stillPhoto);
+                console.log(`Captured still photo via ImageCapture (${Math.round(blob.size / 1024)}KB)`);
+                return flippedStillPhoto;
+            } catch (error) {
+                console.warn("ImageCapture failed, falling back to video frame capture.", error);
+            }
+        }
+
+        if (video.videoWidth && video.videoHeight) {
+            const canvas = document.createElement("canvas");
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext("2d", { alpha: false });
+
+            if (ctx) {
+                ctx.imageSmoothingEnabled = false;
+                ctx.translate(canvas.width, 0);
+                ctx.scale(-1, 1);
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                return canvas.toDataURL(captureMimeType, captureImageQuality);
+            }
+        }
+
+        const imageSrc = webcamRef.current?.getScreenshot();
+        return imageSrc ? flipImageSource(imageSrc) : null;
     }, [webcamRef]);
+
+    const handleUserMedia = useCallback(async (stream: MediaStream) => {
+        const track = stream.getVideoTracks()[0];
+        if (!track) return;
+
+        try {
+            await track.applyConstraints({
+                width: { ideal: 2560 },
+                height: { ideal: 1440 },
+                aspectRatio: { ideal: 16 / 9 },
+                advanced: [
+                    { focusMode: "continuous" } as any,
+                    { exposureMode: "continuous" } as any,
+                    { whiteBalanceMode: "continuous" } as any,
+                ],
+            } as MediaTrackConstraints);
+        } catch (error) {
+            console.warn("Camera rejected high-resolution constraints; using browser-selected quality.", error);
+        }
+
+        const settings = track.getSettings();
+        console.log(`Camera stream active at ${settings.width || "?"}x${settings.height || "?"}`);
+    }, []);
 
     const getCaptureResolution = () => {
         const video = webcamRef.current?.video;
@@ -564,8 +629,11 @@ export default function ScannerApp() {
                         audio={false}
                         ref={webcamRef}
                         screenshotFormat="image/png"
+                        minScreenshotWidth={1920}
+                        minScreenshotHeight={1080}
                         forceScreenshotSourceSize={true}
                         videoConstraints={videoConstraints}
+                        onUserMedia={handleUserMedia}
                         className={`webcam-preview ${isCapturing ? "capture-flash" : ""}`}
                         mirrored={true} // Usually better UX for front camera
                     />
