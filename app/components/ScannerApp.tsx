@@ -41,6 +41,9 @@ export default function ScannerApp() {
     const [imageSolveMode, setImageSolveMode] = useState(false);
     const [imageSolveStatus, setImageSolveStatus] = useState<"idle" | "capturing" | "solving" | "done" | "error">("idle");
     const [imageSolveAnswer, setImageSolveAnswer] = useState<string | null>(null);
+    const [imageSolveBackupAnswer, setImageSolveBackupAnswer] = useState<string | null>(null);
+    const [imageSolveBackupStatus, setImageSolveBackupStatus] = useState<"idle" | "queued" | "solving" | "done" | "error">("idle");
+    const [imageSolveBackupError, setImageSolveBackupError] = useState<string | null>(null);
     const [imageSolveError, setImageSolveError] = useState<string | null>(null);
     const [imageSolveCountdown, setImageSolveCountdown] = useState<number | null>(null);
 
@@ -225,7 +228,13 @@ export default function ScannerApp() {
     };
 
     const startImageSolve = () => {
-        if (imageSolveStatus === "solving" || imageSolveStatus === "capturing" || imageSolveCountdown !== null) return;
+        if (
+            imageSolveStatus === "solving" ||
+            imageSolveStatus === "capturing" ||
+            imageSolveBackupStatus === "queued" ||
+            imageSolveBackupStatus === "solving" ||
+            imageSolveCountdown !== null
+        ) return;
         setImageSolveCountdown(captureDelay);
     };
 
@@ -329,6 +338,9 @@ export default function ScannerApp() {
 
         setImageSolveStatus("capturing");
         setImageSolveAnswer(null);
+        setImageSolveBackupAnswer(null);
+        setImageSolveBackupStatus("idle");
+        setImageSolveBackupError(null);
         setImageSolveError(null);
 
         const imageSrc = webcamRef.current.getScreenshot();
@@ -367,33 +379,63 @@ export default function ScannerApp() {
 
             const data = await response.json();
 
-            if (!response.ok || data.error) {
+            if (!response.ok || (data.error && !data.jobId)) {
                 throw new Error(data.error || `Server returned ${response.status}`);
             }
 
+            const applyImageSolveData = (statusData: any) => {
+                const primaryAnswer = statusData.primaryAnswer || statusData.answer;
+                if (primaryAnswer) {
+                    setImageSolveAnswer(primaryAnswer);
+                    setImageSolveStatus("done");
+                }
+
+                if (statusData.backupStatus) {
+                    setImageSolveBackupStatus(statusData.backupStatus);
+                }
+
+                if (statusData.backupAnswer) {
+                    setImageSolveBackupAnswer(statusData.backupAnswer);
+                    setImageSolveBackupStatus("done");
+                }
+
+                if (statusData.backupError) {
+                    setImageSolveBackupError(statusData.backupError);
+                    setImageSolveBackupStatus("error");
+                }
+
+                if (!primaryAnswer && statusData.status === "error") {
+                    setImageSolveError(statusData.error || "Image solve failed.");
+                    setImageSolveStatus("error");
+                    return true;
+                }
+
+                return (
+                    statusData.backupStatus === "done" ||
+                    statusData.backupStatus === "error" ||
+                    Boolean(statusData.backupAnswer) ||
+                    Boolean(statusData.backupError)
+                );
+            };
+
+            applyImageSolveData(data);
+
             if (data.jobId) {
-                // Poll for status
                 const pollInterval = setInterval(async () => {
                     try {
                         const statusRes = await fetch(`/api/image-solve/status?jobId=${data.jobId}`);
                         if (!statusRes.ok) return; // ignore temporary network errors
                         const statusData = await statusRes.json();
-                        
-                        if (statusData.status === 'done') {
+
+                        const shouldStop = applyImageSolveData(statusData);
+                        if (shouldStop) {
                             clearInterval(pollInterval);
-                            setImageSolveAnswer(statusData.answer || "(No answer returned)");
-                            setImageSolveStatus("done");
-                        } else if (statusData.status === 'error') {
-                            clearInterval(pollInterval);
-                            setImageSolveError(statusData.error || "Image solve failed.");
-                            setImageSolveStatus("error");
                         }
                     } catch (e: any) {
                         console.error("Polling error:", e);
                     }
                 }, 3000);
             } else {
-                // Fallback direct answer (e.g., from Gemini API)
                 setImageSolveAnswer(data.answer || "(No answer returned)");
                 setImageSolveStatus("done");
             }
@@ -490,6 +532,12 @@ export default function ScannerApp() {
 
     if (!mounted) return null;
 
+    const imageSolveBusy =
+        imageSolveStatus === "solving" ||
+        imageSolveStatus === "capturing" ||
+        imageSolveBackupStatus === "queued" ||
+        imageSolveBackupStatus === "solving";
+
     return (
         <div className="scanner-layout">
             {/* Left side: Camera Viewport */}
@@ -532,18 +580,26 @@ export default function ScannerApp() {
                 <div className="controls">
                     {/* Mode toggle */}
                     <div className="solve-mode-toggle">
-                        <button
-                            className={`mode-btn ${!imageSolveMode ? 'active' : ''}`}
-                            onClick={() => { setImageSolveMode(false); setImageSolveStatus('idle'); }}
-                        >
-                            📄 Scan Mode
-                        </button>
-                        <button
-                            className={`mode-btn ${imageSolveMode ? 'active' : ''}`}
-                            onClick={() => { setImageSolveMode(true); setImageSolveStatus('idle'); }}
-                        >
-                            🧠 Image Solve
-                        </button>
+                            <button
+                                className={`mode-btn ${!imageSolveMode ? 'active' : ''}`}
+                                onClick={() => {
+                                    setImageSolveMode(false);
+                                    setImageSolveStatus('idle');
+                                    setImageSolveBackupStatus('idle');
+                                }}
+                            >
+                                📄 Scan Mode
+                            </button>
+                            <button
+                                className={`mode-btn ${imageSolveMode ? 'active' : ''}`}
+                                onClick={() => {
+                                    setImageSolveMode(true);
+                                    setImageSolveStatus('idle');
+                                    setImageSolveBackupStatus('idle');
+                                }}
+                            >
+                                🧠 Image Solve
+                            </button>
                     </div>
 
                     {!imageSolveMode ? (
@@ -579,18 +635,19 @@ export default function ScannerApp() {
                     ) : (
                         <>
                             <button
-                                className={`capture-btn image-solve-btn ${imageSolveStatus === 'solving' || imageSolveStatus === 'capturing' || imageSolveCountdown !== null ? 'counting' : ''
+                                className={`capture-btn image-solve-btn ${imageSolveBusy || imageSolveCountdown !== null ? 'counting' : ''
                                     }`}
                                 onClick={startImageSolve}
-                                disabled={imageSolveStatus === 'solving' || imageSolveStatus === 'capturing' || imageSolveCountdown !== null}
+                                disabled={imageSolveBusy || imageSolveCountdown !== null}
                             >
                                 <div className="capture-inner"></div>
                             </button>
                             <p className="instruction-text" style={{ marginTop: '0.5rem', marginBottom: '1rem' }}>
                                 {imageSolveCountdown !== null && `Position paper. Capturing in ${imageSolveCountdown}s...`}
                                 {imageSolveCountdown === null && imageSolveStatus === 'capturing' && 'Capturing image...'}
-                                {imageSolveCountdown === null && imageSolveStatus === 'solving' && '🧠 Sending to Gemini via browser...'}
-                                {imageSolveCountdown === null && imageSolveStatus === 'done' && '✅ Answer received!'}
+                                {imageSolveCountdown === null && imageSolveStatus === 'solving' && 'Sending to ChatGPT via browser...'}
+                                {imageSolveCountdown === null && imageSolveStatus === 'done' && imageSolveBackupStatus !== 'queued' && imageSolveBackupStatus !== 'solving' && 'Answer received!'}
+                                {imageSolveCountdown === null && imageSolveStatus === 'done' && (imageSolveBackupStatus === 'queued' || imageSolveBackupStatus === 'solving') && 'ChatGPT answer received. Waiting for Gemini backup...'}
                                 {imageSolveCountdown === null && imageSolveStatus === 'error' && '❌ ' + imageSolveError}
                                 {imageSolveCountdown === null && imageSolveStatus === 'idle' && `Tap to start ${captureDelay}-second image solve timer`}
                             </p>
@@ -606,7 +663,7 @@ export default function ScannerApp() {
                                     value={captureDelay}
                                     onChange={(e) => setCaptureDelay(parseInt(e.target.value))}
                                     className="delay-slider"
-                                    disabled={imageSolveStatus === 'solving' || imageSolveStatus === 'capturing' || imageSolveCountdown !== null}
+                                    disabled={imageSolveBusy || imageSolveCountdown !== null}
                                 />
                             </div>
 
@@ -614,15 +671,37 @@ export default function ScannerApp() {
                             {imageSolveStatus === 'done' && imageSolveAnswer && (
                                 <div className="image-solve-result">
                                     <div className="image-solve-result-header">
-                                        <span>🧠 Gemini Answer</span>
+                                        <span>ChatGPT Answer</span>
                                         <button
                                             className="delete-btn"
-                                            onClick={() => { setImageSolveStatus('idle'); setImageSolveAnswer(null); }}
+                                            onClick={() => {
+                                                setImageSolveStatus('idle');
+                                                setImageSolveAnswer(null);
+                                                setImageSolveBackupAnswer(null);
+                                                setImageSolveBackupStatus('idle');
+                                                setImageSolveBackupError(null);
+                                            }}
                                         >✕</button>
                                     </div>
                                     <div className="image-solve-result-body">
                                         {imageSolveAnswer}
                                     </div>
+                                    {(imageSolveBackupStatus === 'queued' || imageSolveBackupStatus === 'solving') && (
+                                        <div className="image-solve-backup">
+                                            Gemini backup is still running...
+                                        </div>
+                                    )}
+                                    {imageSolveBackupStatus === 'done' && imageSolveBackupAnswer && (
+                                        <div className="image-solve-backup">
+                                            <div className="image-solve-backup-title">Gemini Backup Answer</div>
+                                            <div>{imageSolveBackupAnswer}</div>
+                                        </div>
+                                    )}
+                                    {imageSolveBackupStatus === 'error' && imageSolveBackupError && (
+                                        <div className="image-solve-backup error">
+                                            Gemini backup failed: {imageSolveBackupError}
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </>

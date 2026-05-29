@@ -38,7 +38,7 @@ async function solveWithGeminiAPI(imageBase64: string, prompt: string): Promise<
     return text;
 }
 
-export const maxDuration = 60; // 60 seconds (Vercel max for many plans)
+export const maxDuration = 480;
 
 export async function POST(req: NextRequest) {
     try {
@@ -66,11 +66,28 @@ export async function POST(req: NextRequest) {
             if (browserRes.ok) {
                 const data = await browserRes.json();
                 if (data.answer) {
-                    console.log("[image-solve] ✅ Browser service succeeded.");
-                    return NextResponse.json({ answer: data.answer, source: "browser" });
+                    console.log("[image-solve] Browser service returned primary answer.");
+                    return NextResponse.json({
+                        jobId: data.jobId,
+                        answer: data.answer,
+                        primaryAnswer: data.primaryAnswer || data.answer,
+                        backupAnswer: data.backupAnswer || null,
+                        backupStatus: data.backupStatus || (data.jobId ? "queued" : null),
+                        backupProvider: data.backupProvider || "gemini",
+                        provider: data.provider || "chatgpt",
+                        source: "browser",
+                    });
                 } else if (data.jobId) {
                     console.log("[image-solve] Browser service queued job:", data.jobId);
-                    return NextResponse.json({ jobId: data.jobId, source: "browser" });
+                    return NextResponse.json({
+                        jobId: data.jobId,
+                        status: data.status,
+                        error: data.error,
+                        backupStatus: data.backupStatus,
+                        backupProvider: data.backupProvider || "gemini",
+                        provider: data.provider || "chatgpt",
+                        source: "browser",
+                    });
                 }
             } else {
                 const errData = await browserRes.json().catch(() => ({}));

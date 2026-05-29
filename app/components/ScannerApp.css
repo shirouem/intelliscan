@@ -800,7 +800,7 @@
 /* ── Image Solve Answer Panel ───────────────────────────────────────────────── */
 .image-solve-result {
     width: 100%;
-    max-height: 260px;
+    max-height: 360px;
     display: flex;
     flex-direction: column;
     background: hsla(var(--bg-tertiary) / 0.6);
@@ -834,4 +834,28 @@
     white-space: pre-wrap;
     overflow-y: auto;
     flex: 1;
-}
+}
+
+.image-solve-backup {
+    border-top: 1px solid hsla(var(--accent-secondary) / 0.2);
+    padding: 0.85rem 1rem;
+    font-size: 0.84rem;
+    line-height: 1.55;
+    color: hsl(var(--text-secondary));
+    white-space: pre-wrap;
+    overflow-y: auto;
+    max-height: 150px;
+    flex-shrink: 0;
+}
+
+.image-solve-backup-title {
+    margin-bottom: 0.45rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: hsl(var(--accent-secondary));
+}
+
+.image-solve-backup.error {
+    color: hsl(var(--accent-danger));
+}
