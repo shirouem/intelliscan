@@ -88,10 +88,57 @@ export default function ScannerApp() {
         }
     }, [savedQuestions, customSolvePrompt, isLoaded]);
 
-    const videoConstraints = {
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
-        facingMode: "user" // specifically requested front camera
+    const captureMimeType = "image/jpeg";
+    const captureImageQuality = 0.98;
+
+    const videoConstraints: MediaTrackConstraints = {
+        width: { ideal: 2560 },
+        height: { ideal: 1440 },
+        aspectRatio: { ideal: 16 / 9 },
+        facingMode: "user", // Keep using the same existing front/user camera.
+        advanced: [
+            { focusMode: "continuous" } as any,
+            { exposureMode: "continuous" } as any,
+            { whiteBalanceMode: "continuous" } as any,
+        ],
+    };
+
+    const captureHighQualityFrame = useCallback(async () => {
+        if (!webcamRef.current) return null;
+
+        const imageSrc = webcamRef.current.getScreenshot();
+        if (!imageSrc) return null;
+
+        const img = new window.Image();
+        img.src = imageSrc;
+
+        await new Promise((resolve, reject) => {
+            img.onload = resolve;
+            img.onerror = reject;
+        });
+
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth || img.width;
+        canvas.height = img.naturalHeight || img.height;
+        const ctx = canvas.getContext("2d", { alpha: false });
+
+        if (!ctx) return imageSrc;
+
+        ctx.imageSmoothingEnabled = false;
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        return canvas.toDataURL(captureMimeType, captureImageQuality);
+    }, [webcamRef]);
+
+    const getCaptureResolution = () => {
+        const video = webcamRef.current?.video;
+        if (!video) return null;
+        return {
+            width: video.videoWidth,
+            height: video.videoHeight,
+        };
     };
 
     const capture = useCallback(async (autoTriggered = false) => {
@@ -112,34 +159,17 @@ export default function ScannerApp() {
 
         setTimeout(() => setIsCapturing(false), 500);
 
-        const imageSrc = webcamRef.current.getScreenshot();
-        if (!imageSrc) {
+        const base64Image = await captureHighQualityFrame();
+        if (!base64Image) {
             setScanStatus("error");
             setErrorMessage("Failed to capture image from camera.");
             return;
         }
 
         try {
-            // Create an image object to perform the horizontal flip
-            const img = new window.Image();
-            img.src = imageSrc;
-
-            await new Promise((resolve) => {
-                img.onload = resolve;
-            });
-
-            // Draw flipped image to canvas
-            const canvas = document.createElement("canvas");
-            canvas.width = img.width;
-            canvas.height = img.height;
-            const ctx = canvas.getContext("2d");
-
-            let base64Image = imageSrc;
-            if (ctx) {
-                ctx.translate(canvas.width, 0);
-                ctx.scale(-1, 1);
-                ctx.drawImage(img, 0, 0);
-                base64Image = canvas.toDataURL("image/jpeg");
+            const resolution = getCaptureResolution();
+            if (resolution?.width && resolution?.height) {
+                console.log(`Captured scan frame at ${resolution.width}x${resolution.height}`);
             }
 
             const response = await fetch("/api/scan", {
@@ -200,7 +230,7 @@ export default function ScannerApp() {
             setScanStatus("error");
             setErrorMessage(error.message || "Failed to process the question paper.");
         }
-    }, [webcamRef]);
+    }, [webcamRef, captureHighQualityFrame]);
 
     // Timer logic for 6-second countdown
     useEffect(() => {
@@ -343,30 +373,17 @@ export default function ScannerApp() {
         setImageSolveBackupError(null);
         setImageSolveError(null);
 
-        const imageSrc = webcamRef.current.getScreenshot();
-        if (!imageSrc) {
+        const base64Image = await captureHighQualityFrame();
+        if (!base64Image) {
             setImageSolveStatus("error");
             setImageSolveError("Failed to capture image from camera.");
             return;
         }
 
-        // Flip the image (same as normal scan)
-        let base64Image = imageSrc;
-        try {
-            const img = new window.Image();
-            img.src = imageSrc;
-            await new Promise((r) => { img.onload = r; });
-            const canvas = document.createElement("canvas");
-            canvas.width = img.width;
-            canvas.height = img.height;
-            const ctx = canvas.getContext("2d");
-            if (ctx) {
-                ctx.translate(canvas.width, 0);
-                ctx.scale(-1, 1);
-                ctx.drawImage(img, 0, 0);
-                base64Image = canvas.toDataURL("image/jpeg");
-            }
-        } catch (_) { }
+        const resolution = getCaptureResolution();
+        if (resolution?.width && resolution?.height) {
+            console.log(`Captured image-solve frame at ${resolution.width}x${resolution.height}`);
+        }
 
         setImageSolveStatus("solving");
 
@@ -443,7 +460,7 @@ export default function ScannerApp() {
             setImageSolveError(err.message || "Image solve failed.");
             setImageSolveStatus("error");
         }
-    }, [webcamRef, imageSolveStatus, customSolvePrompt]);
+    }, [webcamRef, imageSolveStatus, customSolvePrompt, captureHighQualityFrame]);
 
     // Countdown for Image Solve mode
     useEffect(() => {
@@ -546,8 +563,7 @@ export default function ScannerApp() {
                     <Webcam
                         audio={false}
                         ref={webcamRef}
-                        screenshotFormat="image/jpeg"
-                        screenshotQuality={1}
+                        screenshotFormat="image/png"
                         forceScreenshotSourceSize={true}
                         videoConstraints={videoConstraints}
                         className={`webcam-preview ${isCapturing ? "capture-flash" : ""}`}
