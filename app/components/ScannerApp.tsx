@@ -13,18 +13,6 @@ interface ScannedQuestion {
     isSolving?: boolean; // UI state for loading indicator
 }
 
-interface BrowserImageCapture {
-    takePhoto(photoSettings?: Record<string, number>): Promise<Blob>;
-    getPhotoCapabilities?: () => Promise<{
-        imageWidth?: { max?: number };
-        imageHeight?: { max?: number };
-    }>;
-}
-
-type WindowWithImageCapture = Window & {
-    ImageCapture?: new (track: MediaStreamTrack) => BrowserImageCapture;
-};
-
 export default function ScannerApp() {
     const webcamRef = useRef<Webcam>(null);
     const [isCapturing, setIsCapturing] = useState(false);
@@ -111,19 +99,7 @@ export default function ScannerApp() {
         height: { ideal: 1440 },
         aspectRatio: { ideal: 16 / 9 },
         facingMode: "user", // Keep using the same existing front/user camera.
-        advanced: [
-            { focusMode: "continuous" } as any,
-            { exposureMode: "continuous" } as any,
-            { whiteBalanceMode: "continuous" } as any,
-        ],
     };
-
-    const dataUrlFromBlob = (blob: Blob) => new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-    });
 
     const loadImage = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
         const img = new window.Image();
@@ -151,59 +127,9 @@ export default function ScannerApp() {
         return canvas.toDataURL(captureMimeType, captureImageQuality);
     };
 
-    const getBestStillPhotoSettings = async (imageCapture: BrowserImageCapture) => {
-        if (typeof imageCapture.getPhotoCapabilities !== "function") return undefined;
-
-        try {
-            const capabilities = await imageCapture.getPhotoCapabilities();
-            const settings: Record<string, number> = {};
-
-            if (capabilities?.imageWidth?.max) {
-                settings.imageWidth = capabilities.imageWidth.max;
-            }
-            if (capabilities?.imageHeight?.max) {
-                settings.imageHeight = capabilities.imageHeight.max;
-            }
-
-            return Object.keys(settings).length ? settings : undefined;
-        } catch (error) {
-            console.warn("Could not read still photo capabilities; using default still capture.", error);
-            return undefined;
-        }
-    };
-
     const captureHighQualityFrame = useCallback(async () => {
         const video = webcamRef.current?.video;
         if (!video) return null;
-
-        const stream = video.srcObject as MediaStream | null;
-        const track = stream?.getVideoTracks?.()[0];
-        const ImageCaptureCtor = (window as WindowWithImageCapture).ImageCapture;
-
-        if (track && ImageCaptureCtor) {
-            try {
-                const imageCapture = new ImageCaptureCtor(track);
-                const photoSettings = await getBestStillPhotoSettings(imageCapture);
-                let blob: Blob;
-
-                try {
-                    blob = await imageCapture.takePhoto(photoSettings);
-                } catch (settingsError) {
-                    if (!photoSettings) throw settingsError;
-                    console.warn("Camera rejected max still-photo settings; retrying default still capture.", settingsError);
-                    blob = await imageCapture.takePhoto();
-                }
-
-                const stillPhoto = await dataUrlFromBlob(blob);
-                const imageBitmap = await createImageBitmap(blob).catch(() => null);
-                const dimensions = imageBitmap ? `${imageBitmap.width}x${imageBitmap.height}, ` : "";
-                imageBitmap?.close();
-                console.log(`Captured still photo via ImageCapture (${dimensions}${Math.round(blob.size / 1024)}KB)`);
-                return normalizeImageSource(stillPhoto);
-            } catch (error) {
-                console.warn("ImageCapture failed, falling back to video frame capture.", error);
-            }
-        }
 
         if (video.videoWidth && video.videoHeight) {
             const canvas = document.createElement("canvas");
@@ -214,6 +140,7 @@ export default function ScannerApp() {
             if (ctx) {
                 ctx.imageSmoothingEnabled = false;
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                console.log(`Captured video frame at ${canvas.width}x${canvas.height}`);
                 return canvas.toDataURL(captureMimeType, captureImageQuality);
             }
         }
@@ -231,11 +158,6 @@ export default function ScannerApp() {
                 width: { ideal: 2560 },
                 height: { ideal: 1440 },
                 aspectRatio: { ideal: 16 / 9 },
-                advanced: [
-                    { focusMode: "continuous" } as any,
-                    { exposureMode: "continuous" } as any,
-                    { whiteBalanceMode: "continuous" } as any,
-                ],
             } as MediaTrackConstraints);
         } catch (error) {
             console.warn("Camera rejected high-resolution constraints; using browser-selected quality.", error);
