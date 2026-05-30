@@ -184,7 +184,16 @@ export default function ScannerApp() {
             try {
                 const imageCapture = new ImageCaptureCtor(track);
                 const photoSettings = await getBestStillPhotoSettings(imageCapture);
-                const blob = await imageCapture.takePhoto(photoSettings);
+                let blob: Blob;
+
+                try {
+                    blob = await imageCapture.takePhoto(photoSettings);
+                } catch (settingsError) {
+                    if (!photoSettings) throw settingsError;
+                    console.warn("Camera rejected max still-photo settings; retrying default still capture.", settingsError);
+                    blob = await imageCapture.takePhoto();
+                }
+
                 const stillPhoto = await dataUrlFromBlob(blob);
                 const imageBitmap = await createImageBitmap(blob).catch(() => null);
                 const dimensions = imageBitmap ? `${imageBitmap.width}x${imageBitmap.height}, ` : "";
