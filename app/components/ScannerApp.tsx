@@ -117,7 +117,7 @@ export default function ScannerApp() {
         img.src = src;
     });
 
-    const flipImageSource = async (src: string) => {
+    const normalizeImageSource = async (src: string, flip = false) => {
         const img = await loadImage(src);
         const canvas = document.createElement("canvas");
         canvas.width = img.naturalWidth || img.width;
@@ -127,8 +127,10 @@ export default function ScannerApp() {
         if (!ctx) return src;
 
         ctx.imageSmoothingEnabled = false;
-        ctx.translate(canvas.width, 0);
-        ctx.scale(-1, 1);
+        if (flip) {
+            ctx.translate(canvas.width, 0);
+            ctx.scale(-1, 1);
+        }
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
         return canvas.toDataURL(captureMimeType, captureImageQuality);
@@ -147,9 +149,8 @@ export default function ScannerApp() {
                 const imageCapture = new ImageCaptureCtor(track);
                 const blob = await imageCapture.takePhoto();
                 const stillPhoto = await dataUrlFromBlob(blob);
-                const flippedStillPhoto = await flipImageSource(stillPhoto);
                 console.log(`Captured still photo via ImageCapture (${Math.round(blob.size / 1024)}KB)`);
-                return flippedStillPhoto;
+                return normalizeImageSource(stillPhoto);
             } catch (error) {
                 console.warn("ImageCapture failed, falling back to video frame capture.", error);
             }
@@ -163,15 +164,13 @@ export default function ScannerApp() {
 
             if (ctx) {
                 ctx.imageSmoothingEnabled = false;
-                ctx.translate(canvas.width, 0);
-                ctx.scale(-1, 1);
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                 return canvas.toDataURL(captureMimeType, captureImageQuality);
             }
         }
 
         const imageSrc = webcamRef.current?.getScreenshot();
-        return imageSrc ? flipImageSource(imageSrc) : null;
+        return imageSrc ? normalizeImageSource(imageSrc, true) : null;
     }, [webcamRef]);
 
     const handleUserMedia = useCallback(async (stream: MediaStream) => {
