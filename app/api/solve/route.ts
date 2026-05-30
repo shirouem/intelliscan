@@ -40,9 +40,8 @@ export async function POST(req: NextRequest) {
         `;
 
         const modelsToTry = [
-            "gemini-3.0-flash-preview",
-            "gemini-3.1-flash-lite",
-            "gemini-2.5-flash"
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite"
         ];
 
         let rawText = null;

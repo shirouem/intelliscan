@@ -211,13 +211,11 @@ export default function ScannerApp() {
     const capture = useCallback(async (autoTriggered = false) => {
         if (!webcamRef.current) return;
 
-        // Play capture animation and sound (optional, but a beep helps UX when blind scanning)
+        // Haptic feedback for timer-triggered captures.
         if (autoTriggered) {
             try {
-                const beep = new Audio("data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU... (simplified beep, can use real API sound or just vibrate)");
-                // Just vibrate if supported
                 if ("vibrate" in navigator) navigator.vibrate([100, 50, 100]);
-            } catch (e) { }
+            } catch { }
         }
 
         setIsCapturing(true);

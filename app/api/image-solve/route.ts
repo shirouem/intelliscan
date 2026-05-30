@@ -21,7 +21,7 @@ async function solveWithGeminiAPI(imageBase64: string, prompt: string): Promise<
     const ai = new GoogleGenAI({ apiKey });
 
     const response = await ai.models.generateContent({
-        model: "gemini-3.0-flash-preview",
+        model: "gemini-2.5-flash",
         contents: [
             {
                 role: "user",
