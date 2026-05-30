@@ -41,11 +41,14 @@ export default function ScannerApp() {
     const [imageSolveMode, setImageSolveMode] = useState(false);
     const [imageSolveStatus, setImageSolveStatus] = useState<"idle" | "capturing" | "solving" | "done" | "error">("idle");
     const [imageSolveAnswer, setImageSolveAnswer] = useState<string | null>(null);
+    const [imageSolveScreenshot, setImageSolveScreenshot] = useState<string | null>(null);
     const [imageSolveBackupAnswer, setImageSolveBackupAnswer] = useState<string | null>(null);
+    const [imageSolveBackupScreenshot, setImageSolveBackupScreenshot] = useState<string | null>(null);
     const [imageSolveBackupStatus, setImageSolveBackupStatus] = useState<"idle" | "queued" | "solving" | "done" | "error">("idle");
     const [imageSolveBackupError, setImageSolveBackupError] = useState<string | null>(null);
     const [imageSolveError, setImageSolveError] = useState<string | null>(null);
     const [imageSolveCountdown, setImageSolveCountdown] = useState<number | null>(null);
+    const [expandedSolverScreenshot, setExpandedSolverScreenshot] = useState<{ src: string; label: string } | null>(null);
 
     // Mounted state to avoid hydration errors with Webcam
     const [mounted, setMounted] = useState(false);
@@ -432,7 +435,9 @@ export default function ScannerApp() {
 
         setImageSolveStatus("capturing");
         setImageSolveAnswer(null);
+        setImageSolveScreenshot(null);
         setImageSolveBackupAnswer(null);
+        setImageSolveBackupScreenshot(null);
         setImageSolveBackupStatus("idle");
         setImageSolveBackupError(null);
         setImageSolveError(null);
@@ -471,6 +476,10 @@ export default function ScannerApp() {
                     setImageSolveStatus("done");
                 }
 
+                if (statusData.primaryScreenshot) {
+                    setImageSolveScreenshot(statusData.primaryScreenshot);
+                }
+
                 if (statusData.backupStatus) {
                     setImageSolveBackupStatus(statusData.backupStatus);
                 }
@@ -478,6 +487,10 @@ export default function ScannerApp() {
                 if (statusData.backupAnswer) {
                     setImageSolveBackupAnswer(statusData.backupAnswer);
                     setImageSolveBackupStatus("done");
+                }
+
+                if (statusData.backupScreenshot) {
+                    setImageSolveBackupScreenshot(statusData.backupScreenshot);
                 }
 
                 if (statusData.backupError) {
@@ -760,15 +773,30 @@ export default function ScannerApp() {
                                             onClick={() => {
                                                 setImageSolveStatus('idle');
                                                 setImageSolveAnswer(null);
+                                                setImageSolveScreenshot(null);
                                                 setImageSolveBackupAnswer(null);
+                                                setImageSolveBackupScreenshot(null);
                                                 setImageSolveBackupStatus('idle');
                                                 setImageSolveBackupError(null);
+                                                setExpandedSolverScreenshot(null);
                                             }}
                                         >✕</button>
                                     </div>
                                     <div className="image-solve-result-body">
                                         {imageSolveAnswer}
                                     </div>
+                                    {imageSolveScreenshot && (
+                                        <div className="solver-screenshot-card">
+                                            <div className="solver-screenshot-label">ChatGPT Screenshot</div>
+                                            <button
+                                                className="solver-screenshot-button"
+                                                onClick={() => setExpandedSolverScreenshot({ src: imageSolveScreenshot, label: "ChatGPT Screenshot" })}
+                                                aria-label="Expand ChatGPT screenshot"
+                                            >
+                                                <img src={imageSolveScreenshot} alt="ChatGPT solver screenshot" />
+                                            </button>
+                                        </div>
+                                    )}
                                     {(imageSolveBackupStatus === 'queued' || imageSolveBackupStatus === 'solving') && (
                                         <div className="image-solve-backup">
                                             Gemini backup is still running...
@@ -778,6 +806,18 @@ export default function ScannerApp() {
                                         <div className="image-solve-backup">
                                             <div className="image-solve-backup-title">Gemini Backup Answer</div>
                                             <div>{imageSolveBackupAnswer}</div>
+                                            {imageSolveBackupScreenshot && (
+                                                <div className="solver-screenshot-card backup">
+                                                    <div className="solver-screenshot-label">Gemini Screenshot</div>
+                                                    <button
+                                                        className="solver-screenshot-button"
+                                                        onClick={() => setExpandedSolverScreenshot({ src: imageSolveBackupScreenshot, label: "Gemini Screenshot" })}
+                                                        aria-label="Expand Gemini screenshot"
+                                                    >
+                                                        <img src={imageSolveBackupScreenshot} alt="Gemini solver screenshot" />
+                                                    </button>
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                     {imageSolveBackupStatus === 'error' && imageSolveBackupError && (
@@ -788,6 +828,21 @@ export default function ScannerApp() {
                                 </div>
                             )}
                         </>
+                    )}
+
+                    {expandedSolverScreenshot && (
+                        <div className="solver-screenshot-overlay" onClick={() => setExpandedSolverScreenshot(null)}>
+                            <div className="solver-screenshot-expanded" onClick={(e) => e.stopPropagation()}>
+                                <div className="solver-screenshot-expanded-title">{expandedSolverScreenshot.label}</div>
+                                <img src={expandedSolverScreenshot.src} alt={expandedSolverScreenshot.label} />
+                                <button
+                                    className="solver-screenshot-close"
+                                    onClick={() => setExpandedSolverScreenshot(null)}
+                                >
+                                    Close
+                                </button>
+                            </div>
+                        </div>
                     )}
 
                     <button
