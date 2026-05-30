@@ -16,8 +16,10 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ error: "No image provided" }, { status: 400 });
         }
 
-        // Extract base64 part if it's a data URL
-        const base64Data = image.split(",")[1];
+        // Extract the base64 data and preserve the actual capture format.
+        const dataUrlMatch = String(image).match(/^data:(image\/[a-zA-Z0-9.+-]+)(?:;[^,]*)?;base64,([\s\S]+)$/);
+        const mimeType = dataUrlMatch?.[1] || "image/jpeg";
+        const base64Data = dataUrlMatch?.[2];
         if (!base64Data) {
             return NextResponse.json({ error: "Invalid image format" }, { status: 400 });
         }
@@ -74,7 +76,7 @@ export async function POST(req: NextRequest) {
                             {
                                 inlineData: {
                                     data: base64Data,
-                                    mimeType: "image/jpeg",
+                                    mimeType,
                                 },
                             },
                         ],

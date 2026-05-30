@@ -13,6 +13,18 @@ interface ScannedQuestion {
     isSolving?: boolean; // UI state for loading indicator
 }
 
+interface BrowserImageCapture {
+    takePhoto(photoSettings?: Record<string, number>): Promise<Blob>;
+    getPhotoCapabilities?: () => Promise<{
+        imageWidth?: { max?: number };
+        imageHeight?: { max?: number };
+    }>;
+}
+
+type WindowWithImageCapture = Window & {
+    ImageCapture?: new (track: MediaStreamTrack) => BrowserImageCapture;
+};
+
 export default function ScannerApp() {
     const webcamRef = useRef<Webcam>(null);
     const [isCapturing, setIsCapturing] = useState(false);
@@ -91,8 +103,8 @@ export default function ScannerApp() {
         }
     }, [savedQuestions, customSolvePrompt, isLoaded]);
 
-    const captureMimeType = "image/jpeg";
-    const captureImageQuality = 0.98;
+    const captureMimeType = "image/png";
+    const captureImageQuality = 1;
 
     const videoConstraints: MediaTrackConstraints = {
         width: { ideal: 2560 },
@@ -139,20 +151,45 @@ export default function ScannerApp() {
         return canvas.toDataURL(captureMimeType, captureImageQuality);
     };
 
+    const getBestStillPhotoSettings = async (imageCapture: BrowserImageCapture) => {
+        if (typeof imageCapture.getPhotoCapabilities !== "function") return undefined;
+
+        try {
+            const capabilities = await imageCapture.getPhotoCapabilities();
+            const settings: Record<string, number> = {};
+
+            if (capabilities?.imageWidth?.max) {
+                settings.imageWidth = capabilities.imageWidth.max;
+            }
+            if (capabilities?.imageHeight?.max) {
+                settings.imageHeight = capabilities.imageHeight.max;
+            }
+
+            return Object.keys(settings).length ? settings : undefined;
+        } catch (error) {
+            console.warn("Could not read still photo capabilities; using default still capture.", error);
+            return undefined;
+        }
+    };
+
     const captureHighQualityFrame = useCallback(async () => {
         const video = webcamRef.current?.video;
         if (!video) return null;
 
         const stream = video.srcObject as MediaStream | null;
         const track = stream?.getVideoTracks?.()[0];
-        const ImageCaptureCtor = (window as any).ImageCapture;
+        const ImageCaptureCtor = (window as WindowWithImageCapture).ImageCapture;
 
         if (track && ImageCaptureCtor) {
             try {
                 const imageCapture = new ImageCaptureCtor(track);
-                const blob = await imageCapture.takePhoto();
+                const photoSettings = await getBestStillPhotoSettings(imageCapture);
+                const blob = await imageCapture.takePhoto(photoSettings);
                 const stillPhoto = await dataUrlFromBlob(blob);
-                console.log(`Captured still photo via ImageCapture (${Math.round(blob.size / 1024)}KB)`);
+                const imageBitmap = await createImageBitmap(blob).catch(() => null);
+                const dimensions = imageBitmap ? `${imageBitmap.width}x${imageBitmap.height}, ` : "";
+                imageBitmap?.close();
+                console.log(`Captured still photo via ImageCapture (${dimensions}${Math.round(blob.size / 1024)}KB)`);
                 return normalizeImageSource(stillPhoto);
             } catch (error) {
                 console.warn("ImageCapture failed, falling back to video frame capture.", error);
