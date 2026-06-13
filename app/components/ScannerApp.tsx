@@ -130,6 +130,7 @@ export default function ScannerApp() {
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editingText, setEditingText] = useState("");
     const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const imageSolveRunIdRef = useRef(0);
 
     const [scanStatus, setScanStatus] = useState<"idle" | "scanning" | "success" | "error">("idle");
     const [errorMessage, setErrorMessage] = useState("");
@@ -463,6 +464,38 @@ export default function ScannerApp() {
         setImageSolveCountdown(captureDelay);
     };
 
+    const clearImageSolveResult = useCallback(() => {
+        imageSolveRunIdRef.current += 1;
+        setImageSolveStatus("idle");
+        setImageSolveAnswer(null);
+        setImageSolveScreenshot(null);
+        setImageSolveBackupAnswer(null);
+        setImageSolveBackupScreenshot(null);
+        setImageSolveBackupStatus("idle");
+        setImageSolveBackupError(null);
+        setImageSolveError(null);
+        setImageSolveBrowserError(null);
+        setImageSolveAnswerProvider(null);
+        setImageSolveBackupProvider(null);
+        setImageSolveCountdown(null);
+        setExpandedSolverScreenshot(null);
+    }, []);
+
+    const handleImageSolvePrimaryProviderChange = (provider: ImageSolveProvider) => {
+        if (provider === imageSolvePrimaryProvider) return;
+
+        if (
+            imageSolveStatus === "solving" ||
+            imageSolveStatus === "capturing" ||
+            imageSolveBackupStatus === "queued" ||
+            imageSolveBackupStatus === "solving" ||
+            imageSolveCountdown !== null
+        ) return;
+
+        setImageSolvePrimaryProvider(provider);
+        clearImageSolveResult();
+    };
+
     const resetScanner = () => {
         // We do NOT clear savedQuestions here, we just wipe errors/status
         setScanStatus("idle");
@@ -561,6 +594,10 @@ export default function ScannerApp() {
     const captureAndImageSolve = useCallback(async () => {
         if (!webcamRef.current || imageSolveStatus === "solving" || imageSolveStatus === "capturing") return;
 
+        const runId = imageSolveRunIdRef.current + 1;
+        imageSolveRunIdRef.current = runId;
+        const isCurrentImageSolveRun = () => imageSolveRunIdRef.current === runId;
+
         setImageSolveStatus("capturing");
         setImageSolveAnswer(null);
         setImageSolveScreenshot(null);
@@ -571,16 +608,22 @@ export default function ScannerApp() {
         setImageSolveError(null);
         setImageSolveBrowserError(null);
         setImageSolveAnswerProvider(null);
-        setImageSolveBackupProvider(getBackupProvider(imageSolvePrimaryProvider));
+
+        const requestPrimaryProvider = imageSolvePrimaryProvider;
+        const requestBackupProvider = getBackupProvider(requestPrimaryProvider);
+        setImageSolveBackupProvider(requestBackupProvider);
 
         let base64Image: string | null = null;
         try {
             base64Image = await captureHighQualityFrame(imageSolveCaptureOptions);
         } catch (err: unknown) {
+            if (!isCurrentImageSolveRun()) return;
             setImageSolveStatus("error");
             setImageSolveError(`Image capture failed: ${getErrorMessage(err)}`);
             return;
         }
+
+        if (!isCurrentImageSolveRun()) return;
 
         if (!base64Image) {
             setImageSolveStatus("error");
@@ -608,17 +651,21 @@ export default function ScannerApp() {
                 body: JSON.stringify({
                     image: base64Image,
                     prompt: customSolvePrompt,
-                    primaryProvider: imageSolvePrimaryProvider,
+                    primaryProvider: requestPrimaryProvider,
                 }),
             });
 
             const data = await readImageSolveResponse(response);
+
+            if (!isCurrentImageSolveRun()) return;
 
             if (!response.ok || (data.error && !data.jobId && !data.fallbackRequired)) {
                 throw new Error(data.error || `Server returned ${response.status}`);
             }
 
             const applyImageSolveData = (statusData: ImageSolveStatusData) => {
+                if (!isCurrentImageSolveRun()) return true;
+
                 const browserError =
                     statusData.browserError ||
                     statusData.primaryError ||
@@ -630,7 +677,7 @@ export default function ScannerApp() {
 
                 const primaryAnswer = statusData.primaryAnswer || statusData.answer;
                 const primaryScreenshot = statusData.primaryScreenshot;
-                const resultProvider = statusData.provider || statusData.source || imageSolvePrimaryProvider;
+                const resultProvider = statusData.provider || statusData.source || requestPrimaryProvider;
 
                 if (primaryScreenshot) {
                     setImageSolveScreenshot(primaryScreenshot);
@@ -662,7 +709,7 @@ export default function ScannerApp() {
                     setImageSolveBackupScreenshot(statusData.backupScreenshot);
                     setImageSolveBackupStatus("done");
                     if (!primaryScreenshot && !primaryAnswer) {
-                        setImageSolveAnswerProvider(normalizedBackupProvider || statusData.provider || getBackupProvider(imageSolvePrimaryProvider));
+                        setImageSolveAnswerProvider(normalizedBackupProvider || statusData.provider || requestBackupProvider);
                         setImageSolveStatus("done");
                     }
                 }
@@ -672,7 +719,7 @@ export default function ScannerApp() {
                     setImageSolveBackupStatus("error");
                 }
 
-                if (!primaryAnswer && statusData.status === "error") {
+                if (!primaryAnswer && !primaryScreenshot && statusData.status === "error") {
                     setImageSolveError(statusData.error || "Image solve failed.");
                     setImageSolveStatus("error");
                     return true;
@@ -698,12 +745,14 @@ export default function ScannerApp() {
                     body: JSON.stringify({
                         image: base64Image,
                         prompt: customSolvePrompt,
-                        primaryProvider: imageSolvePrimaryProvider,
+                        primaryProvider: requestPrimaryProvider,
                         useFallbackOnly: true,
                         browserError: data.browserError || data.primaryError || data.error,
                     }),
                 });
                 const fallbackData = await readImageSolveResponse(fallbackResponse);
+
+                if (!isCurrentImageSolveRun()) return;
 
                 if (!fallbackResponse.ok) {
                     const fallbackError = fallbackData.error || `Fallback returned ${fallbackResponse.status}`;
@@ -720,6 +769,11 @@ export default function ScannerApp() {
             if (data.jobId) {
                 const pollInterval = setInterval(async () => {
                     try {
+                        if (!isCurrentImageSolveRun()) {
+                            clearInterval(pollInterval);
+                            return;
+                        }
+
                         const statusRes = await fetch(`/api/image-solve/status?jobId=${data.jobId}`);
                         if (!statusRes.ok) return; // ignore temporary network errors
                         const statusData = await readImageSolveResponse(statusRes);
@@ -732,12 +786,13 @@ export default function ScannerApp() {
                         console.error("Polling error:", e);
                     }
                 }, 3000);
-            } else {
+            } else if (!data.primaryScreenshot && !data.backupScreenshot) {
                 setImageSolveAnswer(data.answer || "(No answer returned)");
                 setImageSolveAnswerProvider(data.provider || data.source || null);
                 setImageSolveStatus("done");
             }
         } catch (err: unknown) {
+            if (!isCurrentImageSolveRun()) return;
             setImageSolveError(getErrorMessage(err));
             setImageSolveStatus("error");
         }
@@ -896,11 +951,7 @@ export default function ScannerApp() {
                                 className={`mode-btn ${!imageSolveMode ? 'active' : ''}`}
                                 onClick={() => {
                                     setImageSolveMode(false);
-                                    setImageSolveStatus('idle');
-                                    setImageSolveBackupStatus('idle');
-                                    setImageSolveBrowserError(null);
-                                    setImageSolveAnswerProvider(null);
-                                    setImageSolveBackupProvider(null);
+                                    clearImageSolveResult();
                                 }}
                             >
                                 📄 Scan Mode
@@ -909,11 +960,7 @@ export default function ScannerApp() {
                                 className={`mode-btn ${imageSolveMode ? 'active' : ''}`}
                                 onClick={() => {
                                     setImageSolveMode(true);
-                                    setImageSolveStatus('idle');
-                                    setImageSolveBackupStatus('idle');
-                                    setImageSolveBrowserError(null);
-                                    setImageSolveAnswerProvider(null);
-                                    setImageSolveBackupProvider(null);
+                                    clearImageSolveResult();
                                 }}
                             >
                                 🧠 Image Solve
@@ -956,16 +1003,20 @@ export default function ScannerApp() {
                                 <span>First response</span>
                                 <div className="provider-priority-actions">
                                     <button
+                                        type="button"
                                         className={`provider-priority-btn ${imageSolvePrimaryProvider === "chatgpt" ? "active" : ""}`}
-                                        onClick={() => setImageSolvePrimaryProvider("chatgpt")}
+                                        onClick={() => handleImageSolvePrimaryProviderChange("chatgpt")}
                                         disabled={imageSolveBusy || imageSolveCountdown !== null}
+                                        aria-pressed={imageSolvePrimaryProvider === "chatgpt"}
                                     >
                                         ChatGPT
                                     </button>
                                     <button
+                                        type="button"
                                         className={`provider-priority-btn ${imageSolvePrimaryProvider === "gemini" ? "active" : ""}`}
-                                        onClick={() => setImageSolvePrimaryProvider("gemini")}
+                                        onClick={() => handleImageSolvePrimaryProviderChange("gemini")}
                                         disabled={imageSolveBusy || imageSolveCountdown !== null}
+                                        aria-pressed={imageSolvePrimaryProvider === "gemini"}
                                     >
                                         Gemini
                                     </button>
@@ -1022,19 +1073,7 @@ export default function ScannerApp() {
                                         <span>{imageSolveProviderLabel} Result</span>
                                         <button
                                             className="delete-btn"
-                                            onClick={() => {
-                                                setImageSolveStatus('idle');
-                                                setImageSolveAnswer(null);
-                                                setImageSolveScreenshot(null);
-                                                setImageSolveBackupAnswer(null);
-                                                setImageSolveBackupScreenshot(null);
-                                                setImageSolveBackupStatus('idle');
-                                                setImageSolveBackupError(null);
-                                                setImageSolveBrowserError(null);
-                                                setImageSolveAnswerProvider(null);
-                                                setImageSolveBackupProvider(null);
-                                                setExpandedSolverScreenshot(null);
-                                            }}
+                                            onClick={clearImageSolveResult}
                                         >✕</button>
                                     </div>
                                     {imageSolveAnswer && (

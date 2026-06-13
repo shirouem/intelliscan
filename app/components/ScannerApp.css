@@ -784,10 +784,11 @@
 }
 
 .provider-priority-toggle {
-    width: 100%;
-    display: flex;
+    width: 280px;
+    max-width: 100%;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
-    justify-content: space-between;
     gap: 0.75rem;
     margin: 0.4rem 0 0.85rem;
     padding: 0.55rem 0.7rem;
@@ -799,14 +800,23 @@
     font-weight: 600;
 }
 
+.provider-priority-toggle > span {
+    min-width: max-content;
+}
+
 .provider-priority-actions {
     display: flex;
     gap: 0.35rem;
+    min-width: 0;
 }
 
 .provider-priority-btn {
+    flex: 1 1 82px;
+    min-width: 0;
     padding: 0.35rem 0.65rem;
+    border: 1px solid transparent;
     border-radius: var(--radius-sm);
+    box-sizing: border-box;
     background: hsla(0, 0%, 100%, 0.05);
     color: hsl(var(--text-secondary));
     font-size: 0.76rem;
@@ -828,6 +838,12 @@
 .provider-priority-btn:disabled {
     opacity: 0.55;
     cursor: not-allowed;
+}
+
+@media (max-width: 420px) {
+    .provider-priority-toggle {
+        grid-template-columns: 1fr;
+    }
 }
 
 /* Image Solve button variant (purple tint) */
