@@ -31,6 +31,33 @@ type ImageSolveStatusData = {
     fallbackRequired?: boolean;
 };
 
+type CaptureFrameOptions = {
+    mimeType: "image/png" | "image/jpeg";
+    quality: number;
+    minQuality: number;
+    maxWidth: number;
+    maxHeight: number;
+    maxDataUrlLength: number;
+};
+
+const scanCaptureOptions: CaptureFrameOptions = {
+    mimeType: "image/jpeg",
+    quality: 0.9,
+    minQuality: 0.72,
+    maxWidth: 1920,
+    maxHeight: 1440,
+    maxDataUrlLength: 3_200_000,
+};
+
+const imageSolveCaptureOptions: CaptureFrameOptions = {
+    mimeType: "image/jpeg",
+    quality: 0.86,
+    minQuality: 0.64,
+    maxWidth: 1600,
+    maxHeight: 1200,
+    maxDataUrlLength: 2_400_000,
+};
+
 const getErrorMessage = (error: unknown, fallback = "Image solve failed.") => {
     if (error instanceof Error) return error.message;
     if (typeof error === "string") return error;
@@ -39,6 +66,18 @@ const getErrorMessage = (error: unknown, fallback = "Image solve failed.") => {
 
 const isImageDataUrl = (value: string) =>
     /^data:image\/[a-zA-Z0-9.+-]+(?:;[^,]*)?;base64,[A-Za-z0-9+/=\s]+$/.test(value);
+
+const dataUrlByteSize = (dataUrl: string) => {
+    const base64 = dataUrl.split(",", 2)[1] || "";
+    const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+    return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+};
+
+const formatBytes = (bytes: number) => {
+    if (bytes < 1024) return `${bytes}B`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+};
 
 const readImageSolveResponse = async (response: Response): Promise<ImageSolveStatusData> => {
     const contentType = response.headers.get("content-type") || "";
@@ -137,9 +176,6 @@ export default function ScannerApp() {
         }
     }, [savedQuestions, customSolvePrompt, isLoaded]);
 
-    const captureMimeType = "image/png";
-    const captureImageQuality = 1;
-
     const videoConstraints: MediaTrackConstraints = {
         width: { ideal: 2560 },
         height: { ideal: 1440 },
@@ -147,53 +183,109 @@ export default function ScannerApp() {
         facingMode: "user", // Keep using the same existing front/user camera.
     };
 
-    const loadImage = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
+    const loadImage = useCallback((src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
         const img = new window.Image();
         img.onload = () => resolve(img);
         img.onerror = reject;
         img.src = src;
-    });
+    }), []);
 
-    const normalizeImageSource = async (src: string, flip = false) => {
-        const img = await loadImage(src);
+    const drawCaptureToCanvas = useCallback((
+        source: CanvasImageSource,
+        sourceWidth: number,
+        sourceHeight: number,
+        flip: boolean,
+        options: CaptureFrameOptions,
+    ) => {
+        const scale = Math.min(1, options.maxWidth / sourceWidth, options.maxHeight / sourceHeight);
         const canvas = document.createElement("canvas");
-        canvas.width = img.naturalWidth || img.width;
-        canvas.height = img.naturalHeight || img.height;
+        canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+        canvas.height = Math.max(1, Math.round(sourceHeight * scale));
         const ctx = canvas.getContext("2d", { alpha: false });
 
-        if (!ctx) return src;
+        if (!ctx) throw new Error("Could not create image capture canvas.");
 
-        ctx.imageSmoothingEnabled = false;
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.imageSmoothingEnabled = scale < 1;
+        ctx.imageSmoothingQuality = "high";
         if (flip) {
             ctx.translate(canvas.width, 0);
             ctx.scale(-1, 1);
         }
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
 
-        return canvas.toDataURL(captureMimeType, captureImageQuality);
-    };
+        return canvas;
+    }, []);
 
-    const captureHighQualityFrame = useCallback(async () => {
+    const encodeCanvasWithinLimit = useCallback((sourceCanvas: HTMLCanvasElement, options: CaptureFrameOptions) => {
+        let canvas = sourceCanvas;
+        let quality = options.quality;
+        let dataUrl = canvas.toDataURL(options.mimeType, quality);
+        let attempts = 0;
+
+        while (dataUrl.length > options.maxDataUrlLength && attempts < 12) {
+            attempts += 1;
+
+            if (quality > options.minQuality + 0.01) {
+                quality = Math.max(options.minQuality, quality - 0.08);
+            } else {
+                const resizedCanvas = document.createElement("canvas");
+                resizedCanvas.width = Math.max(1, Math.round(canvas.width * 0.84));
+                resizedCanvas.height = Math.max(1, Math.round(canvas.height * 0.84));
+                const resizedCtx = resizedCanvas.getContext("2d", { alpha: false });
+                if (!resizedCtx) throw new Error("Could not resize captured image.");
+
+                resizedCtx.fillStyle = "#ffffff";
+                resizedCtx.fillRect(0, 0, resizedCanvas.width, resizedCanvas.height);
+                resizedCtx.imageSmoothingEnabled = true;
+                resizedCtx.imageSmoothingQuality = "high";
+                resizedCtx.drawImage(canvas, 0, 0, resizedCanvas.width, resizedCanvas.height);
+                canvas = resizedCanvas;
+                quality = options.quality;
+            }
+
+            dataUrl = canvas.toDataURL(options.mimeType, quality);
+        }
+
+        if (dataUrl.length > options.maxDataUrlLength) {
+            throw new Error(
+                `Captured image is still too large after compression (${formatBytes(dataUrlByteSize(dataUrl))}). Move the paper closer and try again.`
+            );
+        }
+
+        console.log(
+            `Encoded capture ${canvas.width}x${canvas.height} as ${options.mimeType} (${formatBytes(dataUrlByteSize(dataUrl))}, ${dataUrl.length} chars).`
+        );
+        return dataUrl;
+    }, []);
+
+    const normalizeImageSource = useCallback(async (src: string, flip = false, options = scanCaptureOptions) => {
+        const img = await loadImage(src);
+        const canvas = drawCaptureToCanvas(
+            img,
+            img.naturalWidth || img.width,
+            img.naturalHeight || img.height,
+            flip,
+            options,
+        );
+
+        return encodeCanvasWithinLimit(canvas, options);
+    }, [drawCaptureToCanvas, encodeCanvasWithinLimit, loadImage]);
+
+    const captureHighQualityFrame = useCallback(async (options = scanCaptureOptions) => {
         const video = webcamRef.current?.video;
         if (!video) return null;
 
         if (video.videoWidth && video.videoHeight) {
-            const canvas = document.createElement("canvas");
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            const ctx = canvas.getContext("2d", { alpha: false });
-
-            if (ctx) {
-                ctx.imageSmoothingEnabled = false;
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                console.log(`Captured video frame at ${canvas.width}x${canvas.height}`);
-                return canvas.toDataURL(captureMimeType, captureImageQuality);
-            }
+            const canvas = drawCaptureToCanvas(video, video.videoWidth, video.videoHeight, false, options);
+            console.log(`Captured video frame at ${video.videoWidth}x${video.videoHeight}`);
+            return encodeCanvasWithinLimit(canvas, options);
         }
 
         const imageSrc = webcamRef.current?.getScreenshot();
-        return imageSrc ? normalizeImageSource(imageSrc, true) : null;
-    }, [webcamRef]);
+        return imageSrc ? normalizeImageSource(imageSrc, true, options) : null;
+    }, [drawCaptureToCanvas, encodeCanvasWithinLimit, normalizeImageSource, webcamRef]);
 
     const handleUserMedia = useCallback(async (stream: MediaStream) => {
         const track = stream.getVideoTracks()[0];
@@ -238,7 +330,7 @@ export default function ScannerApp() {
 
         setTimeout(() => setIsCapturing(false), 500);
 
-        const base64Image = await captureHighQualityFrame();
+        const base64Image = await captureHighQualityFrame(scanCaptureOptions);
         if (!base64Image) {
             setScanStatus("error");
             setErrorMessage("Failed to capture image from camera.");
@@ -304,10 +396,10 @@ export default function ScannerApp() {
             });
 
             setScanStatus("success");
-        } catch (error: any) {
+        } catch (error: unknown) {
             console.error("Scan error:", error);
             setScanStatus("error");
-            setErrorMessage(error.message || "Failed to process the question paper.");
+            setErrorMessage(getErrorMessage(error, "Failed to process the question paper."));
         }
     }, [webcamRef, captureHighQualityFrame]);
 
@@ -458,7 +550,7 @@ export default function ScannerApp() {
 
         let base64Image: string | null = null;
         try {
-            base64Image = await captureHighQualityFrame();
+            base64Image = await captureHighQualityFrame(imageSolveCaptureOptions);
         } catch (err: unknown) {
             setImageSolveStatus("error");
             setImageSolveError(`Image capture failed: ${getErrorMessage(err)}`);
@@ -673,9 +765,9 @@ export default function ScannerApp() {
             // Clear selection after process
             setSelectedQuestionIds(new Set());
 
-        } catch (error: any) {
+        } catch (error: unknown) {
             console.error("Solve error:", error);
-            alert("Failed to process solutions: " + error.message);
+            alert("Failed to process solutions: " + getErrorMessage(error));
             // Revert loading states
             setSavedQuestions(prev => prev.map(q => ({ ...q, isSolving: false })));
         } finally {
