@@ -31,6 +31,32 @@ type ImageSolveStatusData = {
     fallbackRequired?: boolean;
 };
 
+const getErrorMessage = (error: unknown, fallback = "Image solve failed.") => {
+    if (error instanceof Error) return error.message;
+    if (typeof error === "string") return error;
+    return fallback;
+};
+
+const isImageDataUrl = (value: string) =>
+    /^data:image\/[a-zA-Z0-9.+-]+(?:;[^,]*)?;base64,[A-Za-z0-9+/=\s]+$/.test(value);
+
+const readImageSolveResponse = async (response: Response): Promise<ImageSolveStatusData> => {
+    const contentType = response.headers.get("content-type") || "";
+    const text = await response.text();
+
+    if (!text.trim()) return {};
+
+    try {
+        return JSON.parse(text) as ImageSolveStatusData;
+    } catch {
+        const preview = text.replace(/\s+/g, " ").trim().slice(0, 240);
+        const responseLabel = `${response.status} ${response.statusText}`.trim();
+        return {
+            error: `Image solve returned ${responseLabel || "a non-JSON response"}${contentType ? ` (${contentType})` : ""}${preview ? `: ${preview}` : "."}`,
+        };
+    }
+};
+
 export default function ScannerApp() {
     const webcamRef = useRef<Webcam>(null);
     const [isCapturing, setIsCapturing] = useState(false);
@@ -430,10 +456,24 @@ export default function ScannerApp() {
         setImageSolveBrowserError(null);
         setImageSolveAnswerProvider(null);
 
-        const base64Image = await captureHighQualityFrame();
+        let base64Image: string | null = null;
+        try {
+            base64Image = await captureHighQualityFrame();
+        } catch (err: unknown) {
+            setImageSolveStatus("error");
+            setImageSolveError(`Image capture failed: ${getErrorMessage(err)}`);
+            return;
+        }
+
         if (!base64Image) {
             setImageSolveStatus("error");
             setImageSolveError("Failed to capture image from camera.");
+            return;
+        }
+
+        if (!isImageDataUrl(base64Image)) {
+            setImageSolveStatus("error");
+            setImageSolveError("Captured image was not a valid base64 image data URL.");
             return;
         }
 
@@ -451,7 +491,7 @@ export default function ScannerApp() {
                 body: JSON.stringify({ image: base64Image, prompt: customSolvePrompt }),
             });
 
-            const data = await response.json();
+            const data = await readImageSolveResponse(response);
 
             if (!response.ok || (data.error && !data.jobId && !data.fallbackRequired)) {
                 throw new Error(data.error || `Server returned ${response.status}`);
@@ -525,7 +565,7 @@ export default function ScannerApp() {
                         browserError: data.browserError || data.primaryError || data.error,
                     }),
                 });
-                const fallbackData = await fallbackResponse.json();
+                const fallbackData = await readImageSolveResponse(fallbackResponse);
 
                 if (!fallbackResponse.ok) {
                     const fallbackError = fallbackData.error || `Fallback returned ${fallbackResponse.status}`;
@@ -544,13 +584,13 @@ export default function ScannerApp() {
                     try {
                         const statusRes = await fetch(`/api/image-solve/status?jobId=${data.jobId}`);
                         if (!statusRes.ok) return; // ignore temporary network errors
-                        const statusData = await statusRes.json();
+                        const statusData = await readImageSolveResponse(statusRes);
 
                         const shouldStop = applyImageSolveData(statusData);
                         if (shouldStop) {
                             clearInterval(pollInterval);
                         }
-                    } catch (e: any) {
+                    } catch (e: unknown) {
                         console.error("Polling error:", e);
                     }
                 }, 3000);
@@ -559,8 +599,8 @@ export default function ScannerApp() {
                 setImageSolveAnswerProvider(data.provider || data.source || null);
                 setImageSolveStatus("done");
             }
-        } catch (err: any) {
-            setImageSolveError(err.message || "Image solve failed.");
+        } catch (err: unknown) {
+            setImageSolveError(getErrorMessage(err));
             setImageSolveStatus("error");
         }
     }, [webcamRef, imageSolveStatus, customSolvePrompt, captureHighQualityFrame]);
