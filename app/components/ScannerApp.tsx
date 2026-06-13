@@ -484,13 +484,7 @@ export default function ScannerApp() {
     const handleImageSolvePrimaryProviderChange = (provider: ImageSolveProvider) => {
         if (provider === imageSolvePrimaryProvider) return;
 
-        if (
-            imageSolveStatus === "solving" ||
-            imageSolveStatus === "capturing" ||
-            imageSolveBackupStatus === "queued" ||
-            imageSolveBackupStatus === "solving" ||
-            imageSolveCountdown !== null
-        ) return;
+        if (imageSolveStatus === "solving" || imageSolveStatus === "capturing" || imageSolveCountdown !== null) return;
 
         setImageSolvePrimaryProvider(provider);
         clearImageSolveResult();
@@ -890,6 +884,10 @@ export default function ScannerApp() {
         imageSolveStatus === "capturing" ||
         imageSolveBackupStatus === "queued" ||
         imageSolveBackupStatus === "solving";
+    const imageSolveSelectorLocked =
+        imageSolveStatus === "solving" ||
+        imageSolveStatus === "capturing" ||
+        imageSolveCountdown !== null;
 
     const imageSolveProviderLabel =
         imageSolveAnswerProvider === "chatgpt" ? "ChatGPT Browser" :
@@ -950,6 +948,7 @@ export default function ScannerApp() {
                             <button
                                 className={`mode-btn ${!imageSolveMode ? 'active' : ''}`}
                                 onClick={() => {
+                                    if (!imageSolveMode) return;
                                     setImageSolveMode(false);
                                     clearImageSolveResult();
                                 }}
@@ -959,6 +958,7 @@ export default function ScannerApp() {
                             <button
                                 className={`mode-btn ${imageSolveMode ? 'active' : ''}`}
                                 onClick={() => {
+                                    if (imageSolveMode) return;
                                     setImageSolveMode(true);
                                     clearImageSolveResult();
                                 }}
@@ -1000,13 +1000,13 @@ export default function ScannerApp() {
                     ) : (
                         <>
                             <div className="provider-priority-toggle">
-                                <span>First response</span>
-                                <div className="provider-priority-actions">
+                                <span className="provider-priority-label">First response</span>
+                                <div className="provider-priority-actions" role="group" aria-label="First response provider">
                                     <button
                                         type="button"
                                         className={`provider-priority-btn ${imageSolvePrimaryProvider === "chatgpt" ? "active" : ""}`}
                                         onClick={() => handleImageSolvePrimaryProviderChange("chatgpt")}
-                                        disabled={imageSolveBusy || imageSolveCountdown !== null}
+                                        disabled={imageSolveSelectorLocked}
                                         aria-pressed={imageSolvePrimaryProvider === "chatgpt"}
                                     >
                                         ChatGPT
@@ -1015,7 +1015,7 @@ export default function ScannerApp() {
                                         type="button"
                                         className={`provider-priority-btn ${imageSolvePrimaryProvider === "gemini" ? "active" : ""}`}
                                         onClick={() => handleImageSolvePrimaryProviderChange("gemini")}
-                                        disabled={imageSolveBusy || imageSolveCountdown !== null}
+                                        disabled={imageSolveSelectorLocked}
                                         aria-pressed={imageSolvePrimaryProvider === "gemini"}
                                     >
                                         Gemini
