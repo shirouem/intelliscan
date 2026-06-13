@@ -114,6 +114,7 @@ const readImageSolveResponse = async (response: Response): Promise<ImageSolveSta
 
 export default function ScannerApp() {
     const webcamRef = useRef<Webcam>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
     const [isCapturing, setIsCapturing] = useState(false);
     const [savedQuestions, setSavedQuestions] = useState<ScannedQuestion[]>([]);
     const [selectedQuestionIds, setSelectedQuestionIds] = useState<Set<string>>(new Set());
@@ -153,6 +154,9 @@ export default function ScannerApp() {
     const [imageSolveBackupProvider, setImageSolveBackupProvider] = useState<ImageSolveProvider | null>(null);
     const [imageSolveCountdown, setImageSolveCountdown] = useState<number | null>(null);
     const [expandedSolverScreenshot, setExpandedSolverScreenshot] = useState<{ src: string; label: string } | null>(null);
+    const [imageSolveUploadMode, setImageSolveUploadMode] = useState(false);
+    const [uploadedImagePreview, setUploadedImagePreview] = useState<string | null>(null);
+    const [uploadedImageBase64, setUploadedImageBase64] = useState<string | null>(null);
 
     // Mounted state to avoid hydration errors with Webcam
     const [mounted, setMounted] = useState(false);
@@ -792,6 +796,118 @@ export default function ScannerApp() {
         }
     }, [webcamRef, imageSolveStatus, customSolvePrompt, imageSolvePrimaryProvider, captureHighQualityFrame]);
 
+    // ── Image Solve: solve from uploaded file ─────────────────────────────────
+    const solveWithUploadedImage = useCallback(async (base64Image: string) => {
+        if (imageSolveStatus === "solving" || imageSolveStatus === "capturing") return;
+
+        const runId = imageSolveRunIdRef.current + 1;
+        imageSolveRunIdRef.current = runId;
+        const isCurrentRun = () => imageSolveRunIdRef.current === runId;
+
+        setImageSolveStatus("solving");
+        setImageSolveAnswer(null);
+        setImageSolveScreenshot(null);
+        setImageSolveBackupAnswer(null);
+        setImageSolveBackupScreenshot(null);
+        setImageSolveBackupStatus("idle");
+        setImageSolveBackupError(null);
+        setImageSolveError(null);
+        setImageSolveBrowserError(null);
+        setImageSolveAnswerProvider(null);
+
+        const requestPrimaryProvider = imageSolvePrimaryProvider;
+        const requestBackupProvider = getBackupProvider(requestPrimaryProvider);
+        setImageSolveBackupProvider(requestBackupProvider);
+
+        try {
+            const response = await fetch("/api/image-solve", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    image: base64Image,
+                    prompt: customSolvePrompt,
+                    primaryProvider: requestPrimaryProvider,
+                }),
+            });
+
+            const data = await readImageSolveResponse(response);
+            if (!isCurrentRun()) return;
+
+            if (!response.ok || (data.error && !data.jobId && !data.fallbackRequired)) {
+                throw new Error(data.error || `Server returned ${response.status}`);
+            }
+
+            const applyData = (statusData: ImageSolveStatusData) => {
+                if (!isCurrentRun()) return true;
+                const browserError = statusData.browserError || statusData.primaryError || (!statusData.primaryAnswer && statusData.error ? statusData.error : null);
+                if (browserError) setImageSolveBrowserError(browserError);
+                const primaryAnswer = statusData.primaryAnswer || statusData.answer;
+                const primaryScreenshot = statusData.primaryScreenshot;
+                const resultProvider = statusData.provider || statusData.source || requestPrimaryProvider;
+                if (primaryScreenshot) { setImageSolveScreenshot(primaryScreenshot); setImageSolveAnswerProvider(resultProvider); setImageSolveStatus("done"); }
+                if (primaryAnswer) { setImageSolveAnswer(primaryAnswer); setImageSolveAnswerProvider(resultProvider); setImageSolveStatus("done"); }
+                if (statusData.backupStatus) setImageSolveBackupStatus(statusData.backupStatus);
+                const normBackup = normalizeImageSolveProvider(statusData.backupProvider);
+                if (normBackup) setImageSolveBackupProvider(normBackup);
+                if (statusData.backupAnswer) { setImageSolveBackupAnswer(statusData.backupAnswer); setImageSolveBackupStatus("done"); }
+                if (statusData.backupScreenshot) { setImageSolveBackupScreenshot(statusData.backupScreenshot); setImageSolveBackupStatus("done"); if (!primaryScreenshot && !primaryAnswer) { setImageSolveAnswerProvider(normBackup || statusData.provider || requestBackupProvider); setImageSolveStatus("done"); } }
+                if (statusData.backupError) { setImageSolveBackupError(statusData.backupError); setImageSolveBackupStatus("error"); }
+                if (!primaryAnswer && !primaryScreenshot && statusData.status === "error") { setImageSolveError(statusData.error || "Image solve failed."); setImageSolveStatus("error"); return true; }
+                return (statusData.backupStatus === "done" || statusData.backupStatus === "error" || Boolean(statusData.backupAnswer) || Boolean(statusData.backupScreenshot) || Boolean(statusData.backupError));
+            };
+
+            applyData(data);
+
+            if (data.fallbackRequired) {
+                setImageSolveBackupStatus("solving");
+                const fallbackResponse = await fetch("/api/image-solve", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ image: base64Image, prompt: customSolvePrompt, primaryProvider: requestPrimaryProvider, useFallbackOnly: true, browserError: data.browserError || data.primaryError || data.error }),
+                });
+                const fallbackData = await readImageSolveResponse(fallbackResponse);
+                if (!isCurrentRun()) return;
+                if (!fallbackResponse.ok) { setImageSolveBackupStatus("error"); setImageSolveBackupError(fallbackData.error || `Fallback returned ${fallbackResponse.status}`); throw new Error(fallbackData.error || `Fallback returned ${fallbackResponse.status}`); }
+                setImageSolveBackupStatus("done");
+                applyData(fallbackData);
+                return;
+            }
+
+            if (data.jobId) {
+                const pollInterval = setInterval(async () => {
+                    try {
+                        if (!isCurrentRun()) { clearInterval(pollInterval); return; }
+                        const statusRes = await fetch(`/api/image-solve/status?jobId=${data.jobId}`);
+                        if (!statusRes.ok) return;
+                        const statusData = await readImageSolveResponse(statusRes);
+                        if (applyData(statusData)) clearInterval(pollInterval);
+                    } catch (e: unknown) { console.error("Polling error:", e); }
+                }, 3000);
+            } else if (!data.primaryScreenshot && !data.backupScreenshot) {
+                setImageSolveAnswer(data.answer || "(No answer returned)");
+                setImageSolveAnswerProvider(data.provider || data.source || null);
+                setImageSolveStatus("done");
+            }
+        } catch (err: unknown) {
+            if (!isCurrentRun()) return;
+            setImageSolveError(getErrorMessage(err));
+            setImageSolveStatus("error");
+        }
+    }, [imageSolveStatus, customSolvePrompt, imageSolvePrimaryProvider]);
+
+    const handleFileUpload = useCallback((file: File) => {
+        if (!file.type.startsWith("image/")) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const dataUrl = e.target?.result as string;
+            if (!dataUrl) return;
+            setUploadedImagePreview(dataUrl);
+            setUploadedImageBase64(dataUrl);
+            clearImageSolveResult();
+        };
+        reader.readAsDataURL(file);
+    }, [clearImageSolveResult]);
+
     // Countdown for Image Solve mode
     useEffect(() => {
         if (imageSolveCountdown === null) return;
@@ -999,6 +1115,20 @@ export default function ScannerApp() {
                         </>
                     ) : (
                         <>
+                            {/* Upload / Camera sub-mode toggle */}
+                            <div className="image-solve-source-toggle">
+                                <button
+                                    className={`image-solve-source-btn ${!imageSolveUploadMode ? 'active' : ''}`}
+                                    onClick={() => { setImageSolveUploadMode(false); clearImageSolveResult(); }}
+                                    disabled={imageSolveBusy || imageSolveCountdown !== null}
+                                >📷 Camera</button>
+                                <button
+                                    className={`image-solve-source-btn ${imageSolveUploadMode ? 'active' : ''}`}
+                                    onClick={() => { setImageSolveUploadMode(true); clearImageSolveResult(); }}
+                                    disabled={imageSolveBusy || imageSolveCountdown !== null}
+                                >📁 Upload</button>
+                            </div>
+
                             <div className="provider-priority-toggle">
                                 <span className="provider-priority-label">First response</span>
                                 <div className="provider-priority-actions" role="radiogroup" aria-label="First response provider">
@@ -1033,48 +1163,94 @@ export default function ScannerApp() {
                                 </div>
                             </div>
 
-                            <button
-                                className={`capture-btn image-solve-btn ${imageSolveBusy || imageSolveCountdown !== null ? 'counting' : ''
-                                    }`}
-                                onClick={startImageSolve}
-                                disabled={imageSolveBusy || imageSolveCountdown !== null}
-                            >
-                                <div className="capture-inner"></div>
-                            </button>
-                            <p className="instruction-text" style={{ marginTop: '0.5rem', marginBottom: '1rem' }}>
-                                {imageSolveCountdown !== null && `Position paper. Capturing in ${imageSolveCountdown}s...`}
-                                {imageSolveCountdown === null && imageSolveStatus === 'capturing' && 'Capturing image...'}
-                                {imageSolveCountdown === null && imageSolveStatus === 'solving' && !imageSolveBrowserError && `Sending to ${imageSolvePrimaryLabel} via browser...`}
-                                {imageSolveCountdown === null && imageSolveStatus === 'solving' && imageSolveBrowserError && 'Browser solve failed. Running fallback...'}
-                                {imageSolveCountdown === null && imageSolveStatus === 'done' && imageSolveBackupStatus !== 'queued' && imageSolveBackupStatus !== 'solving' && 'Result received!'}
-                                {imageSolveCountdown === null && imageSolveStatus === 'done' && (imageSolveBackupStatus === 'queued' || imageSolveBackupStatus === 'solving') && `${imageSolvePrimaryLabel} screenshot received. Waiting for ${imageSolveBackupLabel} backup...`}
-                                {imageSolveCountdown === null && imageSolveStatus === 'error' && '❌ ' + imageSolveError}
-                                {imageSolveCountdown === null && imageSolveStatus === 'idle' && `Tap to start ${captureDelay}-second image solve timer`}
-                            </p>
+                            {imageSolveUploadMode ? (
+                                <>
+                                    {/* File upload zone */}
+                                    <input
+                                        ref={fileInputRef}
+                                        type="file"
+                                        accept="image/*"
+                                        className="image-upload-file-input"
+                                        disabled={imageSolveBusy}
+                                        onChange={(e) => {
+                                            const file = e.target.files?.[0];
+                                            if (file) handleFileUpload(file);
+                                            e.target.value = '';
+                                        }}
+                                    />
+                                    <div
+                                        className={`image-upload-zone ${uploadedImagePreview ? 'has-preview' : ''} ${imageSolveBusy ? 'disabled' : ''}`}
+                                        onClick={() => !imageSolveBusy && fileInputRef.current?.click()}
+                                        onDragOver={(e) => e.preventDefault()}
+                                        onDrop={(e) => {
+                                            e.preventDefault();
+                                            const file = e.dataTransfer.files?.[0];
+                                            if (file) handleFileUpload(file);
+                                        }}
+                                    >
+                                        {uploadedImagePreview ? (
+                                            <img src={uploadedImagePreview} alt="Uploaded preview" className="image-upload-preview" />
+                                        ) : (
+                                            <div className="image-upload-placeholder">
+                                                <span className="image-upload-icon">📷</span>
+                                                <span className="image-upload-hint">Tap to choose image</span>
+                                                <span className="image-upload-hint-sub">or drag &amp; drop</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <button
+                                        className={`capture-btn image-solve-btn ${imageSolveBusy ? 'counting' : ''}`}
+                                        onClick={() => { if (uploadedImageBase64) solveWithUploadedImage(uploadedImageBase64); }}
+                                        disabled={imageSolveBusy || !uploadedImageBase64}
+                                    >
+                                        <div className="capture-inner"></div>
+                                    </button>
+                                    <p className="instruction-text" style={{ marginTop: '0.5rem', marginBottom: '1rem' }}>
+                                        {imageSolveStatus === 'solving' && !imageSolveBrowserError && `Sending to ${imageSolvePrimaryLabel} via browser...`}
+                                        {imageSolveStatus === 'solving' && imageSolveBrowserError && 'Browser solve failed. Running fallback...'}
+                                        {imageSolveStatus === 'done' && imageSolveBackupStatus !== 'queued' && imageSolveBackupStatus !== 'solving' && 'Result received!'}
+                                        {imageSolveStatus === 'done' && (imageSolveBackupStatus === 'queued' || imageSolveBackupStatus === 'solving') && `${imageSolvePrimaryLabel} screenshot received. Waiting for ${imageSolveBackupLabel} backup...`}
+                                        {imageSolveStatus === 'error' && '❌ ' + imageSolveError}
+                                        {imageSolveStatus === 'idle' && !uploadedImageBase64 && 'Choose an image to solve'}
+                                        {imageSolveStatus === 'idle' && uploadedImageBase64 && 'Tap the button to send image'}
+                                    </p>
+                                </>
+                            ) : (
+                                <>
+                                    <button
+                                        className={`capture-btn image-solve-btn ${imageSolveBusy || imageSolveCountdown !== null ? 'counting' : ''}`}
+                                        onClick={startImageSolve}
+                                        disabled={imageSolveBusy || imageSolveCountdown !== null}
+                                    >
+                                        <div className="capture-inner"></div>
+                                    </button>
+                                    <p className="instruction-text" style={{ marginTop: '0.5rem', marginBottom: '1rem' }}>
+                                        {imageSolveCountdown !== null && `Position paper. Capturing in ${imageSolveCountdown}s...`}
+                                        {imageSolveCountdown === null && imageSolveStatus === 'capturing' && 'Capturing image...'}
+                                        {imageSolveCountdown === null && imageSolveStatus === 'solving' && !imageSolveBrowserError && `Sending to ${imageSolvePrimaryLabel} via browser...`}
+                                        {imageSolveCountdown === null && imageSolveStatus === 'solving' && imageSolveBrowserError && 'Browser solve failed. Running fallback...'}
+                                        {imageSolveCountdown === null && imageSolveStatus === 'done' && imageSolveBackupStatus !== 'queued' && imageSolveBackupStatus !== 'solving' && 'Result received!'}
+                                        {imageSolveCountdown === null && imageSolveStatus === 'done' && (imageSolveBackupStatus === 'queued' || imageSolveBackupStatus === 'solving') && `${imageSolvePrimaryLabel} screenshot received. Waiting for ${imageSolveBackupLabel} backup...`}
+                                        {imageSolveCountdown === null && imageSolveStatus === 'error' && '❌ ' + imageSolveError}
+                                        {imageSolveCountdown === null && imageSolveStatus === 'idle' && `Tap to start ${captureDelay}-second image solve timer`}
+                                    </p>
 
-                            {imageSolveBrowserError && (
-                                <div className="image-solve-browser-error">
-                                    <strong>Browser solve failed:</strong> {imageSolveBrowserError}
-                                    {(imageSolveStatus === 'solving' || imageSolveBackupStatus === 'queued' || imageSolveBackupStatus === 'solving') && (
-                                        <span> Fallback is running...</span>
-                                    )}
-                                </div>
+                                    <div className="delay-slider-container">
+                                        <label className="delay-label">
+                                            Capture Delay: <span>{captureDelay}s</span>
+                                        </label>
+                                        <input
+                                            type="range"
+                                            min="1"
+                                            max="20"
+                                            value={captureDelay}
+                                            onChange={(e) => setCaptureDelay(parseInt(e.target.value))}
+                                            className="delay-slider"
+                                            disabled={imageSolveBusy || imageSolveCountdown !== null}
+                                        />
+                                    </div>
+                                </>
                             )}
-
-                            <div className="delay-slider-container">
-                                <label className="delay-label">
-                                    Capture Delay: <span>{captureDelay}s</span>
-                                </label>
-                                <input
-                                    type="range"
-                                    min="1"
-                                    max="20"
-                                    value={captureDelay}
-                                    onChange={(e) => setCaptureDelay(parseInt(e.target.value))}
-                                    className="delay-slider"
-                                    disabled={imageSolveBusy || imageSolveCountdown !== null}
-                                />
-                            </div>
 
                             {/* Result panel */}
                             {hasImageSolveResult && (
