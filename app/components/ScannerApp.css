@@ -823,18 +823,19 @@
 .provider-priority-option {
     display: block;
     min-width: 0;
+    position: relative;
 }
 
 .provider-priority-input {
     position: absolute;
-    width: 1px;
-    height: 1px;
-    margin: -1px;
-    padding: 0;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    margin: 0;
+    cursor: pointer;
+    z-index: 1;
 }
 
 .provider-priority-choice {
@@ -857,7 +858,7 @@
     cursor: pointer;
 }
 
-.provider-priority-option:hover .provider-priority-input:not(:disabled) + .provider-priority-choice {
+.provider-priority-option:hover .provider-priority-input:not(:disabled):not(:checked) + .provider-priority-choice {
     color: hsl(var(--text-primary));
     background: hsla(0, 0%, 100%, 0.1);
 }
@@ -877,6 +878,7 @@
 
 .provider-priority-input:disabled + .provider-priority-choice {
     cursor: not-allowed;
+    opacity: 0.5;
 }
 
 /* Image Solve button variant (purple tint) */

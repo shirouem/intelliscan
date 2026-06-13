@@ -1001,7 +1001,7 @@ export default function ScannerApp() {
                         <>
                             <div className="provider-priority-toggle">
                                 <span className="provider-priority-label">First response</span>
-                                <fieldset className="provider-priority-actions" aria-label="First response provider">
+                                <div className="provider-priority-actions" role="radiogroup" aria-label="First response provider">
                                     <label className="provider-priority-option">
                                         <input
                                             type="radio"
@@ -1030,7 +1030,7 @@ export default function ScannerApp() {
                                             Gemini
                                         </span>
                                     </label>
-                                </fieldset>
+                                </div>
                             </div>
 
                             <button
