@@ -862,14 +862,17 @@
     background: hsla(0, 0%, 100%, 0.1);
 }
 
+.provider-priority-choice.selected,
 .provider-priority-input:checked + .provider-priority-choice {
-    background: hsla(var(--accent-secondary) / 0.2);
-    color: hsl(var(--accent-secondary));
-    box-shadow: 0 0 0 1px hsla(var(--accent-secondary) / 0.35), 0 0 12px hsla(var(--accent-secondary) / 0.18);
+    background: hsl(var(--accent-secondary));
+    color: hsl(var(--bg-primary));
+    font-weight: 800;
+    box-shadow: 0 0 0 1px hsla(var(--accent-secondary) / 0.65), 0 0 16px hsla(var(--accent-secondary) / 0.25);
 }
 
 .provider-priority-input:focus-visible + .provider-priority-choice {
-    box-shadow: 0 0 0 2px hsl(var(--accent-secondary)), 0 0 12px hsla(var(--accent-secondary) / 0.18);
+    outline: 2px solid hsl(var(--accent-secondary));
+    outline-offset: 2px;
 }
 
 .provider-priority-input:disabled + .provider-priority-choice {

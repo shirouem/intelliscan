@@ -1012,7 +1012,9 @@ export default function ScannerApp() {
                                             onChange={() => handleImageSolvePrimaryProviderChange("chatgpt")}
                                             disabled={imageSolveSelectorLocked}
                                         />
-                                        <span className="provider-priority-choice">ChatGPT</span>
+                                        <span className={`provider-priority-choice ${imageSolvePrimaryProvider === "chatgpt" ? "selected" : ""}`}>
+                                            ChatGPT
+                                        </span>
                                     </label>
                                     <label className="provider-priority-option">
                                         <input
@@ -1024,7 +1026,9 @@ export default function ScannerApp() {
                                             onChange={() => handleImageSolvePrimaryProviderChange("gemini")}
                                             disabled={imageSolveSelectorLocked}
                                         />
-                                        <span className="provider-priority-choice">Gemini</span>
+                                        <span className={`provider-priority-choice ${imageSolvePrimaryProvider === "gemini" ? "selected" : ""}`}>
+                                            Gemini
+                                        </span>
                                     </label>
                                 </fieldset>
                             </div>
