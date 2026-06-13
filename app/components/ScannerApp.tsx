@@ -1001,26 +1001,32 @@ export default function ScannerApp() {
                         <>
                             <div className="provider-priority-toggle">
                                 <span className="provider-priority-label">First response</span>
-                                <div className="provider-priority-actions" role="group" aria-label="First response provider">
-                                    <button
-                                        type="button"
-                                        className={`provider-priority-btn ${imageSolvePrimaryProvider === "chatgpt" ? "active" : ""}`}
-                                        onClick={() => handleImageSolvePrimaryProviderChange("chatgpt")}
-                                        disabled={imageSolveSelectorLocked}
-                                        aria-pressed={imageSolvePrimaryProvider === "chatgpt"}
-                                    >
-                                        ChatGPT
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className={`provider-priority-btn ${imageSolvePrimaryProvider === "gemini" ? "active" : ""}`}
-                                        onClick={() => handleImageSolvePrimaryProviderChange("gemini")}
-                                        disabled={imageSolveSelectorLocked}
-                                        aria-pressed={imageSolvePrimaryProvider === "gemini"}
-                                    >
-                                        Gemini
-                                    </button>
-                                </div>
+                                <fieldset className="provider-priority-actions" aria-label="First response provider">
+                                    <label className="provider-priority-option">
+                                        <input
+                                            type="radio"
+                                            name="image-solve-primary-provider"
+                                            className="provider-priority-input"
+                                            value="chatgpt"
+                                            checked={imageSolvePrimaryProvider === "chatgpt"}
+                                            onChange={() => handleImageSolvePrimaryProviderChange("chatgpt")}
+                                            disabled={imageSolveSelectorLocked}
+                                        />
+                                        <span className="provider-priority-choice">ChatGPT</span>
+                                    </label>
+                                    <label className="provider-priority-option">
+                                        <input
+                                            type="radio"
+                                            name="image-solve-primary-provider"
+                                            className="provider-priority-input"
+                                            value="gemini"
+                                            checked={imageSolvePrimaryProvider === "gemini"}
+                                            onChange={() => handleImageSolvePrimaryProviderChange("gemini")}
+                                            disabled={imageSolveSelectorLocked}
+                                        />
+                                        <span className="provider-priority-choice">Gemini</span>
+                                    </label>
+                                </fieldset>
                             </div>
 
                             <button
