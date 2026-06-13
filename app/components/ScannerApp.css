@@ -798,6 +798,23 @@
 }
 
 /* ── Image Solve Answer Panel ───────────────────────────────────────────────── */
+.image-solve-browser-error {
+    width: 100%;
+    margin: -0.35rem 0 0.85rem;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid hsla(var(--accent-danger) / 0.35);
+    border-radius: var(--radius-sm);
+    background: hsla(var(--accent-danger) / 0.08);
+    color: hsl(var(--text-primary));
+    font-size: 0.82rem;
+    line-height: 1.45;
+    text-align: left;
+}
+
+.image-solve-browser-error strong {
+    color: hsl(var(--accent-danger));
+}
+
 .image-solve-result {
     width: 100%;
     max-height: 520px;

@@ -1,8 +1,41 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 
-if (typeof (globalThis as any).imageSolveKeyIndex === "undefined") {
-    (globalThis as any).imageSolveKeyIndex = 0;
+declare global {
+    var imageSolveKeyIndex: number | undefined;
+}
+
+type ImageSolveBody = {
+    image?: string;
+    prompt?: string;
+    useFallbackOnly?: boolean;
+    browserError?: string | null;
+};
+
+type BrowserSolveResponse = {
+    jobId?: string;
+    status?: string;
+    error?: string;
+    answer?: string;
+    primaryAnswer?: string;
+    primaryScreenshot?: string | null;
+    primaryError?: string | null;
+    browserError?: string | null;
+    backupAnswer?: string | null;
+    backupScreenshot?: string | null;
+    backupStatus?: string | null;
+    backupProvider?: string;
+    provider?: string;
+};
+
+function getErrorMessage(error: unknown, fallback = "Unknown error") {
+    if (error instanceof Error) return error.message;
+    if (typeof error === "string") return error;
+    return fallback;
+}
+
+if (typeof globalThis.imageSolveKeyIndex === "undefined") {
+    globalThis.imageSolveKeyIndex = 0;
 }
 
 async function solveWithGeminiAPI(imageBase64: string, prompt: string): Promise<string> {
@@ -14,9 +47,9 @@ async function solveWithGeminiAPI(imageBase64: string, prompt: string): Promise<
     const mimeType = imageBase64.startsWith("data:image/png") ? "image/png" : "image/jpeg";
     const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, "");
 
-    const keyIndex = (globalThis as any).imageSolveKeyIndex % apiKeys.length;
+    const keyIndex = (globalThis.imageSolveKeyIndex ?? 0) % apiKeys.length;
     const apiKey = apiKeys[keyIndex];
-    (globalThis as any).imageSolveKeyIndex = (keyIndex + 1) % apiKeys.length;
+    globalThis.imageSolveKeyIndex = (keyIndex + 1) % apiKeys.length;
 
     const ai = new GoogleGenAI({ apiKey });
 
@@ -42,8 +75,8 @@ export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
     try {
-        const body = await req.json();
-        const { image, prompt } = body;
+        const body = await req.json() as ImageSolveBody;
+        const { image, prompt, useFallbackOnly } = body;
 
         if (!image) {
             return NextResponse.json({ error: "No image provided." }, { status: 400 });
@@ -52,10 +85,43 @@ export async function POST(req: NextRequest) {
         const solvePrompt = prompt ||
             "This is a question paper or exam image. Please read every question visible and provide clear, accurate answers for each one.";
 
+        const runGeminiApiFallback = async (browserError?: string | null) => {
+            console.log("[image-solve] Falling back to Gemini API...");
+            try {
+                const answer = await solveWithGeminiAPI(image, solvePrompt);
+                console.log("[image-solve] Gemini API fallback succeeded.");
+                return NextResponse.json({
+                    answer,
+                    provider: "gemini-api",
+                    source: "gemini-api",
+                    browserError: browserError || null,
+                    primaryError: browserError || null,
+                });
+            } catch (apiErr: unknown) {
+                const apiErrorMessage = getErrorMessage(apiErr);
+                console.error("[image-solve] Gemini API fallback failed:", apiErrorMessage);
+                return NextResponse.json(
+                    {
+                        error: browserError
+                            ? `Browser solve failed first: ${browserError}. Gemini API fallback failed: ${apiErrorMessage}`
+                            : `Gemini API fallback failed: ${apiErrorMessage}`,
+                        browserError: browserError || null,
+                        primaryError: browserError || null,
+                    },
+                    { status: 500 }
+                );
+            }
+        };
+
+        if (useFallbackOnly) {
+            return runGeminiApiFallback(body.browserError || null);
+        }
+
         // ── 1. Try browser automation service ───────────────────────────────
         const browserServiceUrl = process.env.BROWSER_SERVICE_URL || "http://localhost:3001";
+        let browserError: string | null = null;
         try {
-            console.log("[image-solve] Trying browser service…");
+            console.log("[image-solve] Trying browser service...");
             const browserRes = await fetch(`${browserServiceUrl}/image-solve`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -64,7 +130,7 @@ export async function POST(req: NextRequest) {
             });
 
             if (browserRes.ok) {
-                const data = await browserRes.json();
+                const data = await browserRes.json() as BrowserSolveResponse;
                 if (data.answer) {
                     console.log("[image-solve] Browser service returned primary answer.");
                     return NextResponse.json({
@@ -77,46 +143,52 @@ export async function POST(req: NextRequest) {
                         backupStatus: data.backupStatus || (data.jobId ? "queued" : null),
                         backupProvider: data.backupProvider || "gemini",
                         provider: data.provider || "chatgpt",
+                        primaryError: data.primaryError || data.browserError || null,
+                        browserError: data.browserError || data.primaryError || null,
                         source: "browser",
                     });
                 } else if (data.jobId) {
+                    const primaryError = data.primaryError || data.browserError || data.error || null;
                     console.log("[image-solve] Browser service queued job:", data.jobId);
                     return NextResponse.json({
                         jobId: data.jobId,
                         status: data.status,
                         error: data.error,
+                        primaryError,
+                        browserError: primaryError,
                         backupStatus: data.backupStatus,
                         backupProvider: data.backupProvider || "gemini",
                         provider: data.provider || "chatgpt",
                         source: "browser",
                     });
                 }
+
+                browserError = "Browser service returned no answer or fallback job.";
             } else {
-                const errData = await browserRes.json().catch(() => ({}));
-                console.warn("[image-solve] Browser service error:", errData.error || browserRes.status);
+                const errData = await browserRes.json().catch(() => ({})) as { error?: string };
+                browserError = errData.error || `Browser service returned HTTP ${browserRes.status}`;
+                console.warn("[image-solve] Browser service error:", browserError);
             }
-        } catch (browserErr: any) {
-            console.warn("[image-solve] Browser service unavailable:", browserErr.message);
+        } catch (browserErr: unknown) {
+            browserError = getErrorMessage(browserErr, "Browser service unavailable.");
+            console.warn("[image-solve] Browser service unavailable:", browserError);
         }
 
-        // ── 2. Fallback: Gemini API ──────────────────────────────────────────
-        console.log("[image-solve] Falling back to Gemini API…");
-        try {
-            const answer = await solveWithGeminiAPI(image, solvePrompt);
-            console.log("[image-solve] ✅ Gemini API fallback succeeded.");
-            return NextResponse.json({ answer, source: "gemini-api" });
-        } catch (apiErr: any) {
-            console.error("[image-solve] Gemini API fallback failed:", apiErr.message);
-            return NextResponse.json(
-                { error: `Both browser service and Gemini API failed. API error: ${apiErr.message}` },
-                { status: 500 }
-            );
-        }
+        return NextResponse.json({
+            status: "browser_failed",
+            error: browserError || "Browser solve failed.",
+            browserError: browserError || "Browser solve failed.",
+            primaryError: browserError || "Browser solve failed.",
+            fallbackRequired: true,
+            fallbackProvider: "gemini-api",
+            source: "browser",
+        });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
+        const errorMessage = getErrorMessage(error, "Failed to process image solve request.");
         console.error("[image-solve route] Unexpected error:", error);
         return NextResponse.json(
-            { error: error.message || "Failed to process image solve request." },
+            { error: errorMessage },
             { status: 500 }
         );
     }
