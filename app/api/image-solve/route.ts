@@ -10,6 +10,7 @@ type ImageSolveBody = {
     prompt?: string;
     useFallbackOnly?: boolean;
     browserError?: string | null;
+    primaryProvider?: "chatgpt" | "gemini";
 };
 
 type BrowserSolveResponse = {
@@ -27,6 +28,10 @@ type BrowserSolveResponse = {
     backupProvider?: string;
     provider?: string;
 };
+
+function normalizeProviderName(providerName: unknown): "chatgpt" | "gemini" {
+    return providerName === "gemini" ? "gemini" : "chatgpt";
+}
 
 function getErrorMessage(error: unknown, fallback = "Unknown error") {
     if (error instanceof Error) return error.message;
@@ -77,6 +82,7 @@ export async function POST(req: NextRequest) {
     try {
         const body = await req.json() as ImageSolveBody;
         const { image, prompt, useFallbackOnly } = body;
+        const primaryProvider = normalizeProviderName(body.primaryProvider);
 
         if (!image) {
             return NextResponse.json({ error: "No image provided." }, { status: 400 });
@@ -125,40 +131,28 @@ export async function POST(req: NextRequest) {
             const browserRes = await fetch(`${browserServiceUrl}/image-solve`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ image, prompt: solvePrompt }),
+                body: JSON.stringify({ image, prompt: solvePrompt, primaryProvider }),
                 signal: AbortSignal.timeout(295_000),
             });
 
             if (browserRes.ok) {
                 const data = await browserRes.json() as BrowserSolveResponse;
-                if (data.answer) {
-                    console.log("[image-solve] Browser service returned primary answer.");
-                    return NextResponse.json({
-                        jobId: data.jobId,
-                        answer: data.answer,
-                        primaryAnswer: data.primaryAnswer || data.answer,
-                        primaryScreenshot: data.primaryScreenshot || null,
-                        backupAnswer: data.backupAnswer || null,
-                        backupScreenshot: data.backupScreenshot || null,
-                        backupStatus: data.backupStatus || (data.jobId ? "queued" : null),
-                        backupProvider: data.backupProvider || "gemini",
-                        provider: data.provider || "chatgpt",
-                        primaryError: data.primaryError || data.browserError || null,
-                        browserError: data.browserError || data.primaryError || null,
-                        source: "browser",
-                    });
-                } else if (data.jobId) {
-                    const primaryError = data.primaryError || data.browserError || data.error || null;
-                    console.log("[image-solve] Browser service queued job:", data.jobId);
+                if (data.jobId || data.answer || data.primaryScreenshot || data.backupScreenshot) {
+                    console.log("[image-solve] Browser service returned image solve job/result.");
                     return NextResponse.json({
                         jobId: data.jobId,
                         status: data.status,
                         error: data.error,
-                        primaryError,
-                        browserError: primaryError,
-                        backupStatus: data.backupStatus,
-                        backupProvider: data.backupProvider || "gemini",
-                        provider: data.provider || "chatgpt",
+                        answer: data.answer || null,
+                        primaryAnswer: data.primaryAnswer || data.answer || null,
+                        primaryScreenshot: data.primaryScreenshot || null,
+                        backupAnswer: data.backupAnswer || null,
+                        backupScreenshot: data.backupScreenshot || null,
+                        backupStatus: data.backupStatus || (data.jobId ? "queued" : null),
+                        backupProvider: data.backupProvider || (primaryProvider === "gemini" ? "chatgpt" : "gemini"),
+                        provider: data.provider || primaryProvider,
+                        primaryError: data.primaryError || data.browserError || data.error || null,
+                        browserError: data.browserError || data.primaryError || data.error || null,
                         source: "browser",
                     });
                 }
