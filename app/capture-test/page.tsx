@@ -30,7 +30,6 @@ export default function CaptureTestPage() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
-  const [browserServiceUrl, setBrowserServiceUrl] = useState(defaultBrowserServiceUrl);
   const [status, setStatus] = useState("Idle");
   const [error, setError] = useState<string | null>(null);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
@@ -45,7 +44,7 @@ export default function CaptureTestPage() {
   const [isSending, setIsSending] = useState(false);
   const [videoSize, setVideoSize] = useState({ width: 0, height: 0 });
 
-  const serviceBase = browserServiceUrl.trim().replace(/\/+$/, "");
+  const serviceBase = defaultBrowserServiceUrl.replace(/\/+$/, "");
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -244,15 +243,6 @@ export default function CaptureTestPage() {
         </div>
 
         <aside className="capture-test-panel controls-panel">
-          <label>
-            Browser service URL
-            <input
-              value={browserServiceUrl}
-              onChange={(event) => setBrowserServiceUrl(event.target.value)}
-              placeholder="http://localhost:3001"
-            />
-          </label>
-
           <label>
             Camera
             <select value={deviceId} onChange={(event) => setDeviceId(event.target.value)}>
