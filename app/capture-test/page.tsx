@@ -15,9 +15,6 @@ type LatestCapture = {
   error?: string;
 };
 
-const defaultBrowserServiceUrl =
-  process.env.NEXT_PUBLIC_BROWSER_SERVICE_URL || "http://localhost:3001";
-
 const formatBytes = (bytes?: number) => {
   if (!bytes) return "-";
   if (bytes < 1024) return `${bytes} B`;
@@ -43,8 +40,6 @@ export default function CaptureTestPage() {
   const [isCameraRunning, setIsCameraRunning] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [videoSize, setVideoSize] = useState({ width: 0, height: 0 });
-
-  const serviceBase = defaultBrowserServiceUrl.replace(/\/+$/, "");
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -140,7 +135,7 @@ export default function CaptureTestPage() {
   const refreshLatestCapture = useCallback(async () => {
     setError(null);
     try {
-      const response = await fetch(`${serviceBase}/latest-capture`, { cache: "no-store" });
+      const response = await fetch("/api/capture-test/latest", { cache: "no-store" });
       const data = (await response.json()) as LatestCapture;
       if (!response.ok) throw new Error(data.error || `Latest capture failed with HTTP ${response.status}`);
       setLatest(data);
@@ -151,7 +146,7 @@ export default function CaptureTestPage() {
       setError(message);
       setStatus("Latest capture unavailable");
     }
-  }, [serviceBase]);
+  }, []);
 
   const captureAndSend = useCallback(async () => {
     setIsSending(true);
@@ -162,7 +157,7 @@ export default function CaptureTestPage() {
       const image = drawCurrentFrame();
       setStatus("Sending capture to browser service...");
 
-      const response = await fetch(`${serviceBase}/capture`, {
+      const response = await fetch("/api/capture-test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -183,7 +178,7 @@ export default function CaptureTestPage() {
     } finally {
       setIsSending(false);
     }
-  }, [drawCurrentFrame, serviceBase]);
+  }, [drawCurrentFrame]);
 
   useEffect(() => {
     refreshDevices().catch(() => undefined);
@@ -197,7 +192,7 @@ export default function CaptureTestPage() {
           <p className="capture-test-kicker">Camera Debug</p>
           <h1>Capture Test Console</h1>
           <p className="capture-test-subtitle">
-            Isolated camera capture that sends the frame directly to the browser service.
+            Isolated camera capture that sends the frame through the app browser-service bridge.
           </p>
         </div>
         <Link className="capture-test-link" href="/">
@@ -298,9 +293,9 @@ export default function CaptureTestPage() {
           </button>
 
           <div className="endpoint-box">
-            <div>POST {serviceBase || "http://localhost:3001"}/capture</div>
-            <div>GET {serviceBase || "http://localhost:3001"}/latest-capture</div>
-            <div>GET {serviceBase || "http://localhost:3001"}/latest-capture/image</div>
+            <div>POST /api/capture-test</div>
+            <div>GET /api/capture-test/latest</div>
+            <div>GET /api/capture-test/latest/image</div>
           </div>
         </aside>
       </section>
