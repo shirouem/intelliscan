@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect } from "react";
-import Webcam from "react-webcam";
 import "./ScannerApp.css";
 
 // Interface for API response
@@ -45,7 +44,7 @@ type CaptureFrameOptions = {
 
 const scanCaptureOptions: CaptureFrameOptions = {
     mimeType: "image/jpeg",
-    quality: 0.9,
+    quality: 0.92,
     minQuality: 0.72,
     maxWidth: 1920,
     maxHeight: 1440,
@@ -54,11 +53,11 @@ const scanCaptureOptions: CaptureFrameOptions = {
 
 const imageSolveCaptureOptions: CaptureFrameOptions = {
     mimeType: "image/jpeg",
-    quality: 0.86,
-    minQuality: 0.64,
-    maxWidth: 1600,
-    maxHeight: 1200,
-    maxDataUrlLength: 2_400_000,
+    quality: 0.92,
+    minQuality: 0.72,
+    maxWidth: 1920,
+    maxHeight: 1440,
+    maxDataUrlLength: 3_200_000,
 };
 
 const getErrorMessage = (error: unknown, fallback = "Image solve failed.") => {
@@ -113,7 +112,8 @@ const readImageSolveResponse = async (response: Response): Promise<ImageSolveSta
 };
 
 export default function ScannerApp() {
-    const webcamRef = useRef<Webcam>(null);
+    const videoRef = useRef<HTMLVideoElement | null>(null);
+    const streamRef = useRef<MediaStream | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [isCapturing, setIsCapturing] = useState(false);
     const [savedQuestions, setSavedQuestions] = useState<ScannedQuestion[]>([]);
@@ -132,6 +132,7 @@ export default function ScannerApp() {
     const [editingText, setEditingText] = useState("");
     const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
     const imageSolveRunIdRef = useRef(0);
+    const cameraRunIdRef = useRef(0);
 
     const [scanStatus, setScanStatus] = useState<"idle" | "scanning" | "success" | "error">("idle");
     const [errorMessage, setErrorMessage] = useState("");
@@ -158,9 +159,10 @@ export default function ScannerApp() {
     const [uploadedImagePreview, setUploadedImagePreview] = useState<string | null>(null);
     const [uploadedImageBase64, setUploadedImageBase64] = useState<string | null>(null);
 
-    // Mounted state to avoid hydration errors with Webcam
+    // Mounted state to avoid hydration errors around browser-only camera APIs.
     const [mounted, setMounted] = useState(false);
     const [isLoaded, setIsLoaded] = useState(false);
+    const [cameraError, setCameraError] = useState<string | null>(null);
 
     useEffect(() => {
         const stored = localStorage.getItem("scannerApp_savedQuestions");
@@ -205,19 +207,63 @@ export default function ScannerApp() {
         }
     }, [savedQuestions, customSolvePrompt, imageSolvePrimaryProvider, isLoaded]);
 
-    const videoConstraints: MediaTrackConstraints = {
-        width: { ideal: 2560 },
-        height: { ideal: 1440 },
-        aspectRatio: { ideal: 16 / 9 },
-        facingMode: "user", // Keep using the same existing front/user camera.
-    };
+    const stopCamera = useCallback(() => {
+        cameraRunIdRef.current += 1;
+        streamRef.current?.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+        if (videoRef.current) videoRef.current.srcObject = null;
+    }, []);
 
-    const loadImage = useCallback((src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
-        const img = new window.Image();
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = src;
-    }), []);
+    const startCamera = useCallback(async () => {
+        setCameraError(null);
+        stopCamera();
+        const runId = cameraRunIdRef.current + 1;
+        cameraRunIdRef.current = runId;
+
+        try {
+            if (!navigator.mediaDevices?.getUserMedia) {
+                throw new Error("This browser does not expose camera capture APIs.");
+            }
+
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: false,
+                video: {
+                    width: { ideal: 2560 },
+                    height: { ideal: 1440 },
+                    aspectRatio: { ideal: 16 / 9 },
+                    facingMode: { ideal: "user" },
+                },
+            });
+
+            if (cameraRunIdRef.current !== runId) {
+                stream.getTracks().forEach((track) => track.stop());
+                return;
+            }
+
+            streamRef.current = stream;
+
+            const video = videoRef.current;
+            if (video) {
+                video.srcObject = stream;
+                await video.play();
+            }
+
+            const track = stream.getVideoTracks()[0];
+            const settings = track?.getSettings();
+            console.log(`Camera stream active at ${settings?.width || "?"}x${settings?.height || "?"}`);
+        } catch (error) {
+            const message = getErrorMessage(error, "Could not start camera.");
+            console.error("Camera start error:", error);
+            setCameraError(message);
+            stopCamera();
+        }
+    }, [stopCamera]);
+
+    useEffect(() => {
+        if (!mounted) return;
+        startCamera();
+        return () => stopCamera();
+    }, [mounted, startCamera, stopCamera]);
 
     const drawCaptureToCanvas = useCallback((
         source: CanvasImageSource,
@@ -289,21 +335,8 @@ export default function ScannerApp() {
         return dataUrl;
     }, []);
 
-    const normalizeImageSource = useCallback(async (src: string, flip = false, options = scanCaptureOptions) => {
-        const img = await loadImage(src);
-        const canvas = drawCaptureToCanvas(
-            img,
-            img.naturalWidth || img.width,
-            img.naturalHeight || img.height,
-            flip,
-            options,
-        );
-
-        return encodeCanvasWithinLimit(canvas, options);
-    }, [drawCaptureToCanvas, encodeCanvasWithinLimit, loadImage]);
-
     const captureHighQualityFrame = useCallback(async (options = scanCaptureOptions) => {
-        const video = webcamRef.current?.video;
+        const video = videoRef.current;
         if (!video) return null;
 
         if (video.videoWidth && video.videoHeight) {
@@ -312,30 +345,11 @@ export default function ScannerApp() {
             return encodeCanvasWithinLimit(canvas, options);
         }
 
-        const imageSrc = webcamRef.current?.getScreenshot();
-        return imageSrc ? normalizeImageSource(imageSrc, true, options) : null;
-    }, [drawCaptureToCanvas, encodeCanvasWithinLimit, normalizeImageSource, webcamRef]);
-
-    const handleUserMedia = useCallback(async (stream: MediaStream) => {
-        const track = stream.getVideoTracks()[0];
-        if (!track) return;
-
-        try {
-            await track.applyConstraints({
-                width: { ideal: 2560 },
-                height: { ideal: 1440 },
-                aspectRatio: { ideal: 16 / 9 },
-            } as MediaTrackConstraints);
-        } catch (error) {
-            console.warn("Camera rejected high-resolution constraints; using browser-selected quality.", error);
-        }
-
-        const settings = track.getSettings();
-        console.log(`Camera stream active at ${settings.width || "?"}x${settings.height || "?"}`);
-    }, []);
+        return null;
+    }, [drawCaptureToCanvas, encodeCanvasWithinLimit]);
 
     const getCaptureResolution = () => {
-        const video = webcamRef.current?.video;
+        const video = videoRef.current;
         if (!video) return null;
         return {
             width: video.videoWidth,
@@ -344,7 +358,7 @@ export default function ScannerApp() {
     };
 
     const capture = useCallback(async (autoTriggered = false) => {
-        if (!webcamRef.current) return;
+        if (!videoRef.current) return;
 
         // Haptic feedback for timer-triggered captures.
         if (autoTriggered) {
@@ -430,7 +444,7 @@ export default function ScannerApp() {
             setScanStatus("error");
             setErrorMessage(getErrorMessage(error, "Failed to process the question paper."));
         }
-    }, [webcamRef, captureHighQualityFrame]);
+    }, [captureHighQualityFrame]);
 
     // Timer logic for 6-second countdown
     useEffect(() => {
@@ -590,7 +604,7 @@ export default function ScannerApp() {
 
     // ── Image Solve: capture frame → /api/image-solve → show answer ──────────
     const captureAndImageSolve = useCallback(async () => {
-        if (!webcamRef.current || imageSolveStatus === "solving" || imageSolveStatus === "capturing") return;
+        if (!videoRef.current || imageSolveStatus === "solving" || imageSolveStatus === "capturing") return;
 
         const runId = imageSolveRunIdRef.current + 1;
         imageSolveRunIdRef.current = runId;
@@ -794,7 +808,7 @@ export default function ScannerApp() {
             setImageSolveError(getErrorMessage(err));
             setImageSolveStatus("error");
         }
-    }, [webcamRef, imageSolveStatus, customSolvePrompt, imageSolvePrimaryProvider, captureHighQualityFrame]);
+    }, [imageSolveStatus, customSolvePrompt, imageSolvePrimaryProvider, captureHighQualityFrame]);
 
     // ── Image Solve: solve from uploaded file ─────────────────────────────────
     const solveWithUploadedImage = useCallback(async (base64Image: string) => {
@@ -1022,18 +1036,18 @@ export default function ScannerApp() {
             {/* Left side: Camera Viewport */}
             <div className="scanner-section">
                 <div className="webcam-container">
-                    <Webcam
-                        audio={false}
-                        ref={webcamRef}
-                        screenshotFormat="image/png"
-                        minScreenshotWidth={1920}
-                        minScreenshotHeight={1080}
-                        forceScreenshotSourceSize={true}
-                        videoConstraints={videoConstraints}
-                        onUserMedia={handleUserMedia}
+                    <video
+                        ref={videoRef}
                         className={`webcam-preview ${isCapturing ? "capture-flash" : ""}`}
-                        mirrored={true} // Usually better UX for front camera
+                        autoPlay
+                        muted
+                        playsInline
                     />
+                    {cameraError && (
+                        <div className="camera-error-overlay">
+                            {cameraError}
+                        </div>
+                    )}
 
                     {/* Overlay scanning effects */}
                     {scanStatus === "scanning" && (
