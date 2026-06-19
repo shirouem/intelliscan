@@ -33,6 +33,35 @@ type ImageSolveStatusData = {
     fallbackRequired?: boolean;
 };
 
+type PollingSolveItem = {
+    id: string;
+    createdAt: string;
+    image: string;
+    status: "capturing" | "solving" | "done" | "error";
+    primaryProvider: ImageSolveProvider;
+    answer?: string | null;
+    screenshot?: string | null;
+    answerProvider?: string | null;
+    backupAnswer?: string | null;
+    backupScreenshot?: string | null;
+    backupStatus?: "idle" | "queued" | "solving" | "done" | "error";
+    backupProvider?: ImageSolveProvider | string | null;
+    backupError?: string | null;
+    browserError?: string | null;
+    error?: string | null;
+};
+
+type SheetDetectionMetrics = {
+    detected: boolean;
+    score: number;
+    averageBrightness: number;
+    darkPixelRatio: number;
+    edgeDensity: number;
+    centerDarkRatio: number;
+    lightPixelRatio: number;
+    mode: "none" | "frame-filled" | "region";
+};
+
 type CaptureFrameOptions = {
     mimeType: "image/png" | "image/jpeg";
     quality: number;
@@ -111,9 +140,177 @@ const readImageSolveResponse = async (response: Response): Promise<ImageSolveSta
     }
 };
 
+const pollingDbName = "intelliscan_polling_solve";
+const pollingStoreName = "results";
+
+const openPollingDb = () => new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(pollingDbName, 1);
+    request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(pollingStoreName)) {
+            db.createObjectStore(pollingStoreName, { keyPath: "id" });
+        }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+});
+
+const loadPollingSolveItems = async () => {
+    const db = await openPollingDb();
+    return new Promise<PollingSolveItem[]>((resolve, reject) => {
+        const tx = db.transaction(pollingStoreName, "readonly");
+        const request = tx.objectStore(pollingStoreName).getAll();
+        request.onsuccess = () => {
+            const items = (request.result as PollingSolveItem[])
+                .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            resolve(items);
+        };
+        request.onerror = () => reject(request.error);
+        tx.oncomplete = () => db.close();
+    });
+};
+
+const savePollingSolveItem = async (item: PollingSolveItem) => {
+    const db = await openPollingDb();
+    return new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(pollingStoreName, "readwrite");
+        tx.objectStore(pollingStoreName).put(item);
+        tx.oncomplete = () => {
+            db.close();
+            resolve();
+        };
+        tx.onerror = () => {
+            db.close();
+            reject(tx.error);
+        };
+    });
+};
+
+const clearPollingSolveItems = async () => {
+    const db = await openPollingDb();
+    return new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(pollingStoreName, "readwrite");
+        tx.objectStore(pollingStoreName).clear();
+        tx.oncomplete = () => {
+            db.close();
+            resolve();
+        };
+        tx.onerror = () => {
+            db.close();
+            reject(tx.error);
+        };
+    });
+};
+
+const emptySheetDetection: SheetDetectionMetrics = {
+    detected: false,
+    score: 0,
+    averageBrightness: 0,
+    darkPixelRatio: 0,
+    edgeDensity: 0,
+    centerDarkRatio: 0,
+    lightPixelRatio: 0,
+    mode: "none",
+};
+
+const analyzeSheetFrame = (video: HTMLVideoElement, canvas: HTMLCanvasElement): SheetDetectionMetrics => {
+    if (!video.videoWidth || !video.videoHeight) return emptySheetDetection;
+
+    const targetWidth = 320;
+    const targetHeight = Math.max(1, Math.round(targetWidth * (video.videoHeight / video.videoWidth)));
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+
+    const ctx = canvas.getContext("2d", { alpha: false });
+    if (!ctx) return emptySheetDetection;
+
+    ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+    const { data } = ctx.getImageData(0, 0, targetWidth, targetHeight);
+    const gray = new Uint8Array(targetWidth * targetHeight);
+
+    let brightnessSum = 0;
+    let darkPixels = 0;
+    let lightPixels = 0;
+    let centerDarkPixels = 0;
+    let centerPixels = 0;
+    let edgePixels = 0;
+    let sampledEdges = 0;
+
+    const centerLeft = Math.round(targetWidth * 0.18);
+    const centerRight = Math.round(targetWidth * 0.82);
+    const centerTop = Math.round(targetHeight * 0.18);
+    const centerBottom = Math.round(targetHeight * 0.82);
+
+    for (let y = 0; y < targetHeight; y += 1) {
+        for (let x = 0; x < targetWidth; x += 1) {
+            const pixelIndex = y * targetWidth + x;
+            const dataIndex = pixelIndex * 4;
+            const value = Math.round(data[dataIndex] * 0.299 + data[dataIndex + 1] * 0.587 + data[dataIndex + 2] * 0.114);
+            gray[pixelIndex] = value;
+            brightnessSum += value;
+            if (value < 115) darkPixels += 1;
+            if (value > 165) lightPixels += 1;
+
+            if (x >= centerLeft && x <= centerRight && y >= centerTop && y <= centerBottom) {
+                centerPixels += 1;
+                if (value < 125) centerDarkPixels += 1;
+            }
+        }
+    }
+
+    for (let y = 1; y < targetHeight; y += 2) {
+        for (let x = 1; x < targetWidth; x += 2) {
+            const pixelIndex = y * targetWidth + x;
+            const horizontal = Math.abs(gray[pixelIndex] - gray[pixelIndex - 1]);
+            const vertical = Math.abs(gray[pixelIndex] - gray[pixelIndex - targetWidth]);
+            if (horizontal + vertical > 52) edgePixels += 1;
+            sampledEdges += 1;
+        }
+    }
+
+    const pixels = targetWidth * targetHeight;
+    const averageBrightness = brightnessSum / pixels;
+    const darkPixelRatio = darkPixels / pixels;
+    const lightPixelRatio = lightPixels / pixels;
+    const centerDarkRatio = centerPixels ? centerDarkPixels / centerPixels : 0;
+    const edgeDensity = sampledEdges ? edgePixels / sampledEdges : 0;
+
+    const frameFilledDetected =
+        averageBrightness > 118 &&
+        darkPixelRatio > 0.012 &&
+        darkPixelRatio < 0.48 &&
+        centerDarkRatio > 0.008 &&
+        edgeDensity > 0.018;
+
+    const regionDetected =
+        lightPixelRatio > 0.32 &&
+        averageBrightness > 105 &&
+        darkPixelRatio > 0.01 &&
+        centerDarkRatio > 0.006 &&
+        edgeDensity > 0.014;
+
+    const score =
+        Math.min(1, averageBrightness / 180) * 0.24 +
+        Math.min(1, darkPixelRatio / 0.08) * 0.28 +
+        Math.min(1, edgeDensity / 0.07) * 0.28 +
+        Math.min(1, lightPixelRatio / 0.65) * 0.2;
+
+    return {
+        detected: frameFilledDetected || regionDetected,
+        score,
+        averageBrightness,
+        darkPixelRatio,
+        edgeDensity,
+        centerDarkRatio,
+        lightPixelRatio,
+        mode: frameFilledDetected ? "frame-filled" : regionDetected ? "region" : "none",
+    };
+};
+
 export default function ScannerApp() {
     const videoRef = useRef<HTMLVideoElement | null>(null);
     const streamRef = useRef<MediaStream | null>(null);
+    const pollingDetectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [isCapturing, setIsCapturing] = useState(false);
     const [savedQuestions, setSavedQuestions] = useState<ScannedQuestion[]>([]);
@@ -133,6 +330,8 @@ export default function ScannerApp() {
     const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
     const imageSolveRunIdRef = useRef(0);
     const cameraRunIdRef = useRef(0);
+    const pollingSolveActiveRef = useRef(false);
+    const pollingCooldownUntilRef = useRef(0);
 
     const [scanStatus, setScanStatus] = useState<"idle" | "scanning" | "success" | "error">("idle");
     const [errorMessage, setErrorMessage] = useState("");
@@ -158,6 +357,14 @@ export default function ScannerApp() {
     const [imageSolveUploadMode, setImageSolveUploadMode] = useState(false);
     const [uploadedImagePreview, setUploadedImagePreview] = useState<string | null>(null);
     const [uploadedImageBase64, setUploadedImageBase64] = useState<string | null>(null);
+    const [pollingSolveMode, setPollingSolveMode] = useState(false);
+    const [pollingSolveEnabled, setPollingSolveEnabled] = useState(false);
+    const [pollingSolveCountdown, setPollingSolveCountdown] = useState<number | null>(null);
+    const [pollingSolveDelay, setPollingSolveDelay] = useState(6);
+    const [pollingDetection, setPollingDetection] = useState<SheetDetectionMetrics>(emptySheetDetection);
+    const [pollingSolveResults, setPollingSolveResults] = useState<PollingSolveItem[]>([]);
+    const [isPollingResultsLoaded, setIsPollingResultsLoaded] = useState(false);
+    const [isPollingSolveActive, setIsPollingSolveActive] = useState(false);
 
     // Mounted state to avoid hydration errors around browser-only camera APIs.
     const [mounted, setMounted] = useState(false);
@@ -206,6 +413,37 @@ export default function ScannerApp() {
             localStorage.setItem("scannerApp_imageSolvePrimaryProvider", imageSolvePrimaryProvider);
         }
     }, [savedQuestions, customSolvePrompt, imageSolvePrimaryProvider, isLoaded]);
+
+    useEffect(() => {
+        if (!mounted) return;
+        loadPollingSolveItems()
+            .then((items) => {
+                setPollingSolveResults(items);
+                setIsPollingResultsLoaded(true);
+            })
+            .catch((error) => {
+                console.error("Failed to load polling solve results", error);
+                setIsPollingResultsLoaded(true);
+            });
+    }, [mounted]);
+
+    const upsertPollingSolveItem = useCallback((item: PollingSolveItem) => {
+        setPollingSolveResults((prev) => {
+            const withoutCurrent = prev.filter((existingItem) => existingItem.id !== item.id);
+            return [item, ...withoutCurrent].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        });
+
+        savePollingSolveItem(item).catch((error) => {
+            console.error("Failed to save polling solve result", error);
+        });
+    }, []);
+
+    const clearPollingSolveStack = useCallback(() => {
+        setPollingSolveResults([]);
+        clearPollingSolveItems().catch((error) => {
+            console.error("Failed to clear polling solve results", error);
+        });
+    }, []);
 
     const stopCamera = useCallback(() => {
         cameraRunIdRef.current += 1;
@@ -502,7 +740,13 @@ export default function ScannerApp() {
     const handleImageSolvePrimaryProviderChange = (provider: ImageSolveProvider) => {
         if (provider === imageSolvePrimaryProvider) return;
 
-        if (imageSolveStatus === "solving" || imageSolveStatus === "capturing" || imageSolveCountdown !== null) return;
+        if (
+            imageSolveStatus === "solving" ||
+            imageSolveStatus === "capturing" ||
+            imageSolveCountdown !== null ||
+            pollingSolveCountdown !== null ||
+            isPollingSolveActive
+        ) return;
 
         setImageSolvePrimaryProvider(provider);
         clearImageSolveResult();
@@ -909,6 +1153,240 @@ export default function ScannerApp() {
         }
     }, [imageSolveStatus, customSolvePrompt, imageSolvePrimaryProvider]);
 
+    const solvePollingImage = useCallback(async (base64Image: string) => {
+        if (pollingSolveActiveRef.current) return;
+
+        pollingSolveActiveRef.current = true;
+        setIsPollingSolveActive(true);
+        const requestPrimaryProvider = imageSolvePrimaryProvider;
+        const requestBackupProvider = getBackupProvider(requestPrimaryProvider);
+        let currentItem: PollingSolveItem = {
+            id: `poll-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            createdAt: new Date().toISOString(),
+            image: base64Image,
+            status: "solving",
+            primaryProvider: requestPrimaryProvider,
+            backupStatus: "idle",
+            backupProvider: requestBackupProvider,
+        };
+
+        const persistPatch = (patch: Partial<PollingSolveItem>) => {
+            currentItem = { ...currentItem, ...patch };
+            upsertPollingSolveItem(currentItem);
+        };
+
+        upsertPollingSolveItem(currentItem);
+
+        const applyPollingData = (statusData: ImageSolveStatusData) => {
+            const browserError =
+                statusData.browserError ||
+                statusData.primaryError ||
+                (!statusData.primaryAnswer && statusData.error ? statusData.error : null);
+            const primaryAnswer = statusData.primaryAnswer || statusData.answer;
+            const primaryScreenshot = statusData.primaryScreenshot;
+            const resultProvider = statusData.provider || statusData.source || requestPrimaryProvider;
+            const normalizedBackupProvider = normalizeImageSolveProvider(statusData.backupProvider);
+
+            const patch: Partial<PollingSolveItem> = {};
+            if (browserError) patch.browserError = browserError;
+            if (primaryAnswer) {
+                patch.answer = primaryAnswer;
+                patch.answerProvider = resultProvider;
+                patch.status = "done";
+            }
+            if (primaryScreenshot) {
+                patch.screenshot = primaryScreenshot;
+                patch.answerProvider = resultProvider;
+                patch.status = "done";
+            }
+            if (statusData.backupStatus) patch.backupStatus = statusData.backupStatus;
+            if (normalizedBackupProvider) patch.backupProvider = normalizedBackupProvider;
+            if (statusData.backupAnswer) {
+                patch.backupAnswer = statusData.backupAnswer;
+                patch.backupStatus = "done";
+            }
+            if (statusData.backupScreenshot) {
+                patch.backupScreenshot = statusData.backupScreenshot;
+                patch.backupStatus = "done";
+                if (!primaryAnswer && !primaryScreenshot) {
+                    patch.answerProvider = normalizedBackupProvider || statusData.provider || requestBackupProvider;
+                    patch.status = "done";
+                }
+            }
+            if (statusData.backupError) {
+                patch.backupError = statusData.backupError;
+                patch.backupStatus = "error";
+            }
+            if (!primaryAnswer && !primaryScreenshot && statusData.status === "error") {
+                patch.error = statusData.error || "Image solve failed.";
+                patch.status = "error";
+            }
+
+            persistPatch(patch);
+
+            return (
+                statusData.backupStatus === "done" ||
+                statusData.backupStatus === "error" ||
+                Boolean(statusData.backupAnswer) ||
+                Boolean(statusData.backupScreenshot) ||
+                Boolean(statusData.backupError)
+            );
+        };
+
+        try {
+            const response = await fetch("/api/image-solve", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    image: base64Image,
+                    prompt: customSolvePrompt,
+                    primaryProvider: requestPrimaryProvider,
+                }),
+            });
+
+            const data = await readImageSolveResponse(response);
+            if (!response.ok || (data.error && !data.jobId && !data.fallbackRequired)) {
+                throw new Error(data.error || `Server returned ${response.status}`);
+            }
+
+            applyPollingData(data);
+
+            if (data.fallbackRequired) {
+                persistPatch({ backupStatus: "solving" });
+                const fallbackResponse = await fetch("/api/image-solve", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        image: base64Image,
+                        prompt: customSolvePrompt,
+                        primaryProvider: requestPrimaryProvider,
+                        useFallbackOnly: true,
+                        browserError: data.browserError || data.primaryError || data.error,
+                    }),
+                });
+                const fallbackData = await readImageSolveResponse(fallbackResponse);
+                if (!fallbackResponse.ok) {
+                    const fallbackError = fallbackData.error || `Fallback returned ${fallbackResponse.status}`;
+                    persistPatch({ backupStatus: "error", backupError: fallbackError, status: currentItem.status === "done" ? "done" : "error", error: fallbackError });
+                    return;
+                }
+                applyPollingData(fallbackData);
+                return;
+            }
+
+            if (data.jobId) {
+                await new Promise<void>((resolve) => {
+                    const pollInterval = setInterval(async () => {
+                        try {
+                            const statusRes = await fetch(`/api/image-solve/status?jobId=${data.jobId}`);
+                            if (!statusRes.ok) return;
+                            const statusData = await readImageSolveResponse(statusRes);
+                            const shouldStop = applyPollingData(statusData);
+                            if (shouldStop) {
+                                clearInterval(pollInterval);
+                                resolve();
+                            }
+                        } catch (error) {
+                            console.error("Polling solve stack status error:", error);
+                        }
+                    }, 3000);
+
+                    setTimeout(() => {
+                        clearInterval(pollInterval);
+                        resolve();
+                    }, 300000);
+                });
+            } else if (!data.primaryScreenshot && !data.backupScreenshot) {
+                persistPatch({
+                    answer: data.answer || "(No answer returned)",
+                    answerProvider: data.provider || data.source || null,
+                    status: "done",
+                });
+            }
+        } catch (error: unknown) {
+            persistPatch({
+                status: "error",
+                error: getErrorMessage(error),
+            });
+        } finally {
+            pollingSolveActiveRef.current = false;
+            setIsPollingSolveActive(false);
+            pollingCooldownUntilRef.current = Date.now() + 5000;
+        }
+    }, [customSolvePrompt, imageSolvePrimaryProvider, upsertPollingSolveItem]);
+
+    useEffect(() => {
+        if (!pollingSolveEnabled || !pollingSolveMode || imageSolveUploadMode) {
+            setPollingDetection(emptySheetDetection);
+            return;
+        }
+
+        const interval = window.setInterval(() => {
+            const video = videoRef.current;
+            const canvas = pollingDetectionCanvasRef.current;
+            if (!video || !canvas || !video.videoWidth || !video.videoHeight) return;
+
+            const metrics = analyzeSheetFrame(video, canvas);
+            setPollingDetection(metrics);
+
+            const busy =
+                pollingSolveActiveRef.current ||
+                pollingSolveCountdown !== null ||
+                imageSolveStatus === "solving" ||
+                imageSolveStatus === "capturing" ||
+                imageSolveBackupStatus === "queued" ||
+                imageSolveBackupStatus === "solving" ||
+                Date.now() < pollingCooldownUntilRef.current;
+
+            if (!busy && metrics.detected) {
+                setPollingSolveCountdown(pollingSolveDelay);
+            }
+        }, 250);
+
+        return () => window.clearInterval(interval);
+    }, [
+        pollingSolveEnabled,
+        pollingSolveMode,
+        imageSolveUploadMode,
+        pollingSolveCountdown,
+        pollingSolveDelay,
+        imageSolveStatus,
+        imageSolveBackupStatus,
+    ]);
+
+    useEffect(() => {
+        if (pollingSolveCountdown === null) return;
+
+        if (pollingSolveCountdown > 0) {
+            const timer = window.setTimeout(() => setPollingSolveCountdown(pollingSolveCountdown - 1), 1000);
+            return () => window.clearTimeout(timer);
+        }
+
+        const runCapture = async () => {
+            setPollingSolveCountdown(null);
+            pollingCooldownUntilRef.current = Date.now() + 1000;
+            try {
+                const base64Image = await captureHighQualityFrame(imageSolveCaptureOptions);
+                if (!base64Image) throw new Error("Failed to capture image from camera.");
+                await solvePollingImage(base64Image);
+            } catch (error) {
+                const item: PollingSolveItem = {
+                    id: `poll-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                    createdAt: new Date().toISOString(),
+                    image: "",
+                    status: "error",
+                    primaryProvider: imageSolvePrimaryProvider,
+                    error: getErrorMessage(error, "Polling capture failed."),
+                    backupStatus: "idle",
+                };
+                upsertPollingSolveItem(item);
+                pollingCooldownUntilRef.current = Date.now() + 5000;
+            }
+        };
+
+        runCapture();
+    }, [pollingSolveCountdown, captureHighQualityFrame, solvePollingImage, imageSolvePrimaryProvider, upsertPollingSolveItem]);
+
     const handleFileUpload = useCallback((file: File) => {
         if (!file.type.startsWith("image/")) return;
         const reader = new FileReader();
@@ -1013,11 +1491,14 @@ export default function ScannerApp() {
         imageSolveStatus === "solving" ||
         imageSolveStatus === "capturing" ||
         imageSolveBackupStatus === "queued" ||
-        imageSolveBackupStatus === "solving";
+        imageSolveBackupStatus === "solving" ||
+        isPollingSolveActive;
     const imageSolveSelectorLocked =
         imageSolveStatus === "solving" ||
         imageSolveStatus === "capturing" ||
-        imageSolveCountdown !== null;
+        imageSolveCountdown !== null ||
+        pollingSolveCountdown !== null ||
+        isPollingSolveActive;
 
     const imageSolveProviderLabel =
         imageSolveAnswerProvider === "chatgpt" ? "ChatGPT Browser" :
@@ -1030,6 +1511,9 @@ export default function ScannerApp() {
     const hasImageSolveResult =
         imageSolveStatus === "done" &&
         Boolean(imageSolveAnswer || imageSolveScreenshot || imageSolveBackupAnswer || imageSolveBackupScreenshot);
+    const pollingDetectionLabel = pollingDetection.detected
+        ? `Sheet detected (${pollingDetection.mode}, ${Math.round(pollingDetection.score * 100)}%)`
+        : `Watching for sheet (${Math.round(pollingDetection.score * 100)}%)`;
 
     return (
         <div className="scanner-layout">
@@ -1132,15 +1616,36 @@ export default function ScannerApp() {
                             {/* Upload / Camera sub-mode toggle */}
                             <div className="image-solve-source-toggle">
                                 <button
-                                    className={`image-solve-source-btn ${!imageSolveUploadMode ? 'active' : ''}`}
-                                    onClick={() => { setImageSolveUploadMode(false); clearImageSolveResult(); }}
-                                    disabled={imageSolveBusy || imageSolveCountdown !== null}
-                                >📷 Camera</button>
+                                    className={`image-solve-source-btn ${!imageSolveUploadMode && !pollingSolveMode ? 'active' : ''}`}
+                                    onClick={() => {
+                                        setImageSolveUploadMode(false);
+                                        setPollingSolveMode(false);
+                                        setPollingSolveEnabled(false);
+                                        setPollingSolveCountdown(null);
+                                        clearImageSolveResult();
+                                    }}
+                                    disabled={imageSolveBusy || imageSolveCountdown !== null || pollingSolveCountdown !== null}
+                                >Camera</button>
+                                <button
+                                    className={`image-solve-source-btn ${pollingSolveMode ? 'active' : ''}`}
+                                    onClick={() => {
+                                        setImageSolveUploadMode(false);
+                                        setPollingSolveMode(true);
+                                        clearImageSolveResult();
+                                    }}
+                                    disabled={imageSolveBusy || imageSolveCountdown !== null || pollingSolveCountdown !== null}
+                                >Polling</button>
                                 <button
                                     className={`image-solve-source-btn ${imageSolveUploadMode ? 'active' : ''}`}
-                                    onClick={() => { setImageSolveUploadMode(true); clearImageSolveResult(); }}
-                                    disabled={imageSolveBusy || imageSolveCountdown !== null}
-                                >📁 Upload</button>
+                                    onClick={() => {
+                                        setImageSolveUploadMode(true);
+                                        setPollingSolveMode(false);
+                                        setPollingSolveEnabled(false);
+                                        setPollingSolveCountdown(null);
+                                        clearImageSolveResult();
+                                    }}
+                                    disabled={imageSolveBusy || imageSolveCountdown !== null || pollingSolveCountdown !== null}
+                                >Upload</button>
                             </div>
 
                             <div className="provider-priority-toggle">
@@ -1228,6 +1733,122 @@ export default function ScannerApp() {
                                         {imageSolveStatus === 'idle' && !uploadedImageBase64 && 'Choose an image to solve'}
                                         {imageSolveStatus === 'idle' && uploadedImageBase64 && 'Tap the button to send image'}
                                     </p>
+                                </>
+                            ) : pollingSolveMode ? (
+                                <>
+                                    <div className="polling-solve-panel">
+                                        <div className="polling-solve-header">
+                                            <div>
+                                                <div className="polling-solve-title">Polling Image Solve</div>
+                                                <div className={`polling-solve-detection ${pollingDetection.detected ? "detected" : ""}`}>
+                                                    {pollingSolveCountdown !== null
+                                                        ? `Sheet found. Capturing in ${pollingSolveCountdown}s...`
+                                                        : pollingSolveEnabled
+                                                            ? pollingDetectionLabel
+                                                            : "Polling is paused"}
+                                                </div>
+                                            </div>
+                                            <button
+                                                className={`image-solve-source-btn ${pollingSolveEnabled ? "active" : ""}`}
+                                                onClick={() => {
+                                                    setPollingSolveEnabled((enabled) => !enabled);
+                                                    setPollingSolveCountdown(null);
+                                                }}
+                                                disabled={isPollingSolveActive}
+                                            >
+                                                {pollingSolveEnabled ? "Pause" : "Start"}
+                                            </button>
+                                        </div>
+
+                                        <div className="polling-solve-metrics">
+                                            <span>Brightness {Math.round(pollingDetection.averageBrightness)}</span>
+                                            <span>Text {Math.round(pollingDetection.darkPixelRatio * 1000) / 10}%</span>
+                                            <span>Edges {Math.round(pollingDetection.edgeDensity * 1000) / 10}%</span>
+                                        </div>
+
+                                        <div className="delay-slider-container">
+                                            <label className="delay-label">
+                                                Polling Capture Delay: <span>{pollingSolveDelay}s</span>
+                                            </label>
+                                            <input
+                                                type="range"
+                                                min="1"
+                                                max="20"
+                                                value={pollingSolveDelay}
+                                                onChange={(e) => setPollingSolveDelay(parseInt(e.target.value))}
+                                                className="delay-slider"
+                                                disabled={pollingSolveCountdown !== null || isPollingSolveActive}
+                                            />
+                                        </div>
+
+                                        <p className="instruction-text" style={{ marginTop: '0.5rem', marginBottom: '1rem' }}>
+                                            {isPollingSolveActive && `Sending polling capture to ${imageSolvePrimaryLabel}...`}
+                                            {!isPollingSolveActive && pollingSolveCountdown === null && pollingSolveEnabled && 'Hold a question sheet in view to start the timer.'}
+                                            {!isPollingSolveActive && pollingSolveCountdown === null && !pollingSolveEnabled && 'Start polling to automatically detect a sheet.'}
+                                        </p>
+                                    </div>
+
+                                    <div className="polling-results-panel">
+                                        <div className="polling-results-header">
+                                            <span>Polling Solve Stack ({pollingSolveResults.length})</span>
+                                            {pollingSolveResults.length > 0 && (
+                                                <button className="delete-btn" onClick={clearPollingSolveStack}>
+                                                    Clear
+                                                </button>
+                                            )}
+                                        </div>
+                                        {!isPollingResultsLoaded && (
+                                            <div className="polling-results-empty">Loading saved polling results...</div>
+                                        )}
+                                        {isPollingResultsLoaded && pollingSolveResults.length === 0 && (
+                                            <div className="polling-results-empty">No polling solves yet.</div>
+                                        )}
+                                        {pollingSolveResults.map((item) => {
+                                            const itemProviderLabel = getProviderLabel(item.answerProvider || item.primaryProvider);
+                                            return (
+                                                <div className={`polling-result-card ${item.status}`} key={item.id}>
+                                                    <button
+                                                        className="polling-result-image"
+                                                        onClick={() => item.image && setExpandedSolverScreenshot({ src: item.image, label: "Polling Request Image" })}
+                                                        disabled={!item.image}
+                                                    >
+                                                        {item.image ? <img src={item.image} alt="Polling request" /> : <span>No image</span>}
+                                                    </button>
+                                                    <div className="polling-result-content">
+                                                        <div className="polling-result-meta">
+                                                            <span>{new Date(item.createdAt).toLocaleTimeString()}</span>
+                                                            <span>{item.status}</span>
+                                                            <span>{itemProviderLabel}</span>
+                                                        </div>
+                                                        {item.error && <div className="polling-result-error">{item.error}</div>}
+                                                        {item.browserError && <div className="polling-result-warning">{item.browserError}</div>}
+                                                        {item.answer && <div className="polling-result-answer">{item.answer}</div>}
+                                                        {item.screenshot && (
+                                                            <button
+                                                                className="polling-result-link"
+                                                                onClick={() => setExpandedSolverScreenshot({ src: item.screenshot!, label: `${itemProviderLabel} Screenshot` })}
+                                                            >
+                                                                Open primary screenshot
+                                                            </button>
+                                                        )}
+                                                        {(item.backupStatus === "queued" || item.backupStatus === "solving") && (
+                                                            <div className="polling-result-warning">{getProviderLabel(item.backupProvider)} backup running...</div>
+                                                        )}
+                                                        {item.backupScreenshot && (
+                                                            <button
+                                                                className="polling-result-link"
+                                                                onClick={() => setExpandedSolverScreenshot({ src: item.backupScreenshot!, label: `${getProviderLabel(item.backupProvider)} Backup Screenshot` })}
+                                                            >
+                                                                Open backup screenshot
+                                                            </button>
+                                                        )}
+                                                        {item.backupAnswer && <div className="polling-result-answer">{item.backupAnswer}</div>}
+                                                        {item.backupError && <div className="polling-result-error">{item.backupError}</div>}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
                                 </>
                             ) : (
                                 <>
@@ -1539,6 +2160,7 @@ export default function ScannerApp() {
                     )}
                 </div>
             </div>
+            <canvas ref={pollingDetectionCanvasRef} hidden />
         </div>
     );
 }
