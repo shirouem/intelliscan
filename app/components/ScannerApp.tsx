@@ -53,13 +53,21 @@ type PollingSolveItem = {
 
 type SheetDetectionMetrics = {
     detected: boolean;
+    baselineReady: boolean;
     score: number;
     averageBrightness: number;
     darkPixelRatio: number;
     edgeDensity: number;
     centerDarkRatio: number;
     lightPixelRatio: number;
+    changeRatio: number;
+    centerChangeRatio: number;
     mode: "none" | "frame-filled" | "region";
+};
+
+type SheetFrameAnalysis = {
+    metrics: SheetDetectionMetrics;
+    gray: Uint8Array;
 };
 
 type CaptureFrameOptions = {
@@ -204,17 +212,26 @@ const clearPollingSolveItems = async () => {
 
 const emptySheetDetection: SheetDetectionMetrics = {
     detected: false,
+    baselineReady: false,
     score: 0,
     averageBrightness: 0,
     darkPixelRatio: 0,
     edgeDensity: 0,
     centerDarkRatio: 0,
     lightPixelRatio: 0,
+    changeRatio: 0,
+    centerChangeRatio: 0,
     mode: "none",
 };
 
-const analyzeSheetFrame = (video: HTMLVideoElement, canvas: HTMLCanvasElement): SheetDetectionMetrics => {
-    if (!video.videoWidth || !video.videoHeight) return emptySheetDetection;
+const analyzeSheetFrame = (
+    video: HTMLVideoElement,
+    canvas: HTMLCanvasElement,
+    baseline: Uint8Array | null,
+): SheetFrameAnalysis => {
+    if (!video.videoWidth || !video.videoHeight) {
+        return { metrics: emptySheetDetection, gray: new Uint8Array() };
+    }
 
     const targetWidth = 320;
     const targetHeight = Math.max(1, Math.round(targetWidth * (video.videoHeight / video.videoWidth)));
@@ -222,11 +239,12 @@ const analyzeSheetFrame = (video: HTMLVideoElement, canvas: HTMLCanvasElement): 
     canvas.height = targetHeight;
 
     const ctx = canvas.getContext("2d", { alpha: false });
-    if (!ctx) return emptySheetDetection;
+    if (!ctx) return { metrics: emptySheetDetection, gray: new Uint8Array() };
 
     ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
     const { data } = ctx.getImageData(0, 0, targetWidth, targetHeight);
     const gray = new Uint8Array(targetWidth * targetHeight);
+    const pixels = targetWidth * targetHeight;
 
     let brightnessSum = 0;
     let darkPixels = 0;
@@ -235,6 +253,8 @@ const analyzeSheetFrame = (video: HTMLVideoElement, canvas: HTMLCanvasElement): 
     let centerPixels = 0;
     let edgePixels = 0;
     let sampledEdges = 0;
+    let changedPixels = 0;
+    let centerChangedPixels = 0;
 
     const centerLeft = Math.round(targetWidth * 0.18);
     const centerRight = Math.round(targetWidth * 0.82);
@@ -255,6 +275,16 @@ const analyzeSheetFrame = (video: HTMLVideoElement, canvas: HTMLCanvasElement): 
                 centerPixels += 1;
                 if (value < 125) centerDarkPixels += 1;
             }
+
+            if (baseline && baseline.length === pixels) {
+                const changed = Math.abs(value - baseline[pixelIndex]) > 34;
+                if (changed) {
+                    changedPixels += 1;
+                    if (x >= centerLeft && x <= centerRight && y >= centerTop && y <= centerBottom) {
+                        centerChangedPixels += 1;
+                    }
+                }
+            }
         }
     }
 
@@ -268,26 +298,36 @@ const analyzeSheetFrame = (video: HTMLVideoElement, canvas: HTMLCanvasElement): 
         }
     }
 
-    const pixels = targetWidth * targetHeight;
     const averageBrightness = brightnessSum / pixels;
     const darkPixelRatio = darkPixels / pixels;
     const lightPixelRatio = lightPixels / pixels;
     const centerDarkRatio = centerPixels ? centerDarkPixels / centerPixels : 0;
     const edgeDensity = sampledEdges ? edgePixels / sampledEdges : 0;
+    const baselineReady = Boolean(baseline && baseline.length === pixels);
+    const changeRatio = baselineReady ? changedPixels / pixels : 0;
+    const centerChangeRatio = baselineReady && centerPixels ? centerChangedPixels / centerPixels : 0;
 
-    const frameFilledDetected =
+    const frameFilledDocument =
         averageBrightness > 118 &&
         darkPixelRatio > 0.012 &&
         darkPixelRatio < 0.48 &&
         centerDarkRatio > 0.008 &&
         edgeDensity > 0.018;
 
-    const regionDetected =
+    const regionDocument =
         lightPixelRatio > 0.32 &&
         averageBrightness > 105 &&
         darkPixelRatio > 0.01 &&
         centerDarkRatio > 0.006 &&
         edgeDensity > 0.014;
+
+    const changedFromBaseline =
+        baselineReady &&
+        changeRatio > 0.075 &&
+        centerChangeRatio > 0.045;
+
+    const frameFilledDetected = frameFilledDocument && changedFromBaseline;
+    const regionDetected = regionDocument && changedFromBaseline;
 
     const score =
         Math.min(1, averageBrightness / 180) * 0.24 +
@@ -296,14 +336,20 @@ const analyzeSheetFrame = (video: HTMLVideoElement, canvas: HTMLCanvasElement): 
         Math.min(1, lightPixelRatio / 0.65) * 0.2;
 
     return {
+        metrics: {
         detected: frameFilledDetected || regionDetected,
+        baselineReady,
         score,
         averageBrightness,
         darkPixelRatio,
         edgeDensity,
         centerDarkRatio,
         lightPixelRatio,
+        changeRatio,
+        centerChangeRatio,
         mode: frameFilledDetected ? "frame-filled" : regionDetected ? "region" : "none",
+        },
+        gray,
     };
 };
 
@@ -332,6 +378,7 @@ export default function ScannerApp() {
     const cameraRunIdRef = useRef(0);
     const pollingSolveActiveRef = useRef(false);
     const pollingCooldownUntilRef = useRef(0);
+    const pollingBaselineRef = useRef<Uint8Array | null>(null);
 
     const [scanStatus, setScanStatus] = useState<"idle" | "scanning" | "success" | "error">("idle");
     const [errorMessage, setErrorMessage] = useState("");
@@ -443,6 +490,12 @@ export default function ScannerApp() {
         clearPollingSolveItems().catch((error) => {
             console.error("Failed to clear polling solve results", error);
         });
+    }, []);
+
+    const resetPollingBaseline = useCallback(() => {
+        pollingBaselineRef.current = null;
+        setPollingDetection(emptySheetDetection);
+        setPollingSolveCountdown(null);
     }, []);
 
     const stopCamera = useCallback(() => {
@@ -1317,6 +1370,7 @@ export default function ScannerApp() {
 
     useEffect(() => {
         if (!pollingSolveEnabled || !pollingSolveMode || imageSolveUploadMode) {
+            pollingBaselineRef.current = null;
             setPollingDetection(emptySheetDetection);
             return;
         }
@@ -1326,7 +1380,21 @@ export default function ScannerApp() {
             const canvas = pollingDetectionCanvasRef.current;
             if (!video || !canvas || !video.videoWidth || !video.videoHeight) return;
 
-            const metrics = analyzeSheetFrame(video, canvas);
+            const analysis = analyzeSheetFrame(video, canvas, pollingBaselineRef.current);
+            const { metrics, gray } = analysis;
+
+            if (!metrics.baselineReady) {
+                pollingBaselineRef.current = gray;
+            } else if (
+                !metrics.detected &&
+                metrics.changeRatio < 0.025 &&
+                metrics.centerChangeRatio < 0.02 &&
+                pollingSolveCountdown === null &&
+                !pollingSolveActiveRef.current
+            ) {
+                pollingBaselineRef.current = gray;
+            }
+
             setPollingDetection(metrics);
 
             const busy =
@@ -1513,7 +1581,9 @@ export default function ScannerApp() {
         Boolean(imageSolveAnswer || imageSolveScreenshot || imageSolveBackupAnswer || imageSolveBackupScreenshot);
     const pollingDetectionLabel = pollingDetection.detected
         ? `Sheet detected (${pollingDetection.mode}, ${Math.round(pollingDetection.score * 100)}%)`
-        : `Watching for sheet (${Math.round(pollingDetection.score * 100)}%)`;
+        : pollingDetection.baselineReady
+            ? `Watching for new sheet (${Math.round(pollingDetection.changeRatio * 100)}% change)`
+            : "Learning empty scene...";
 
     return (
         <div className="scanner-layout">
@@ -1621,7 +1691,7 @@ export default function ScannerApp() {
                                         setImageSolveUploadMode(false);
                                         setPollingSolveMode(false);
                                         setPollingSolveEnabled(false);
-                                        setPollingSolveCountdown(null);
+                                        resetPollingBaseline();
                                         clearImageSolveResult();
                                     }}
                                     disabled={imageSolveBusy || imageSolveCountdown !== null || pollingSolveCountdown !== null}
@@ -1631,6 +1701,7 @@ export default function ScannerApp() {
                                     onClick={() => {
                                         setImageSolveUploadMode(false);
                                         setPollingSolveMode(true);
+                                        resetPollingBaseline();
                                         clearImageSolveResult();
                                     }}
                                     disabled={imageSolveBusy || imageSolveCountdown !== null || pollingSolveCountdown !== null}
@@ -1641,7 +1712,7 @@ export default function ScannerApp() {
                                         setImageSolveUploadMode(true);
                                         setPollingSolveMode(false);
                                         setPollingSolveEnabled(false);
-                                        setPollingSolveCountdown(null);
+                                        resetPollingBaseline();
                                         clearImageSolveResult();
                                     }}
                                     disabled={imageSolveBusy || imageSolveCountdown !== null || pollingSolveCountdown !== null}
@@ -1751,12 +1822,22 @@ export default function ScannerApp() {
                                             <button
                                                 className={`image-solve-source-btn ${pollingSolveEnabled ? "active" : ""}`}
                                                 onClick={() => {
-                                                    setPollingSolveEnabled((enabled) => !enabled);
-                                                    setPollingSolveCountdown(null);
+                                                    setPollingSolveEnabled((enabled) => {
+                                                        if (!enabled) resetPollingBaseline();
+                                                        else setPollingSolveCountdown(null);
+                                                        return !enabled;
+                                                    });
                                                 }}
                                                 disabled={isPollingSolveActive}
                                             >
                                                 {pollingSolveEnabled ? "Pause" : "Start"}
+                                            </button>
+                                            <button
+                                                className="image-solve-source-btn"
+                                                onClick={resetPollingBaseline}
+                                                disabled={isPollingSolveActive}
+                                            >
+                                                Reset Baseline
                                             </button>
                                         </div>
 
@@ -1764,6 +1845,7 @@ export default function ScannerApp() {
                                             <span>Brightness {Math.round(pollingDetection.averageBrightness)}</span>
                                             <span>Text {Math.round(pollingDetection.darkPixelRatio * 1000) / 10}%</span>
                                             <span>Edges {Math.round(pollingDetection.edgeDensity * 1000) / 10}%</span>
+                                            <span>Change {Math.round(pollingDetection.changeRatio * 1000) / 10}%</span>
                                         </div>
 
                                         <div className="delay-slider-container">
