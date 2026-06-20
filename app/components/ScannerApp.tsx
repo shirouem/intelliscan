@@ -713,6 +713,7 @@ export default function ScannerApp() {
     const pollingBaselineRef = useRef<Uint8Array | null>(null);
     const pollingDetectionPausedRef = useRef(false);
     const pollingConfidenceSamplesRef = useRef<Array<{ time: number; confidence: number }>>([]);
+    const pollingConfidenceWindowStartRef = useRef<number | null>(null);
     const documentDetectorRef = useRef<DocumentDetector | null>(null);
     const documentDetectorLoadIdRef = useRef(0);
 
@@ -865,6 +866,7 @@ export default function ScannerApp() {
         pollingBaselineRef.current = null;
         pollingDetectionPausedRef.current = false;
         pollingConfidenceSamplesRef.current = [];
+        pollingConfidenceWindowStartRef.current = null;
         documentDetectorRef.current = null;
         setDocumentDetectorStatus("idle");
         setDocumentDetectorError(null);
@@ -1886,6 +1888,7 @@ export default function ScannerApp() {
             setIsPollingSolveActive(false);
             pollingDetectionPausedRef.current = false;
             pollingConfidenceSamplesRef.current = [];
+            pollingConfidenceWindowStartRef.current = null;
             pollingCooldownUntilRef.current = Date.now() + 5000;
         }
     }, [customSolvePrompt, imageSolvePrimaryProvider, upsertPollingSolveItem]);
@@ -1938,6 +1941,7 @@ export default function ScannerApp() {
             pollingBaselineRef.current = null;
             pollingDetectionPausedRef.current = false;
             pollingConfidenceSamplesRef.current = [];
+            pollingConfidenceWindowStartRef.current = null;
             setPollingDetection(emptySheetDetection);
             return;
         }
@@ -1945,6 +1949,7 @@ export default function ScannerApp() {
         if (documentDetectorStatus !== "ready" || !documentDetectorRef.current) {
             setPollingSolveCountdown(null);
             pollingConfidenceSamplesRef.current = [];
+            pollingConfidenceWindowStartRef.current = null;
             setPollingDetection({
                 ...emptySheetDetection,
                 baselineReady: documentDetectorStatus === "ready",
@@ -1971,22 +1976,26 @@ export default function ScannerApp() {
             try {
                 const metrics = await detectSheetWithDocumentModel(video, canvas, detector);
                 const now = Date.now();
+                if (pollingConfidenceWindowStartRef.current === null) {
+                    pollingConfidenceWindowStartRef.current = now;
+                    pollingConfidenceSamplesRef.current = [];
+                }
+
                 pollingConfidenceSamplesRef.current = [
                     ...pollingConfidenceSamplesRef.current,
                     { time: now, confidence: metrics.modelConfidence },
-                ].filter((sample) => now - sample.time <= documentDetectorConfidenceGateMs);
+                ];
 
+                const windowStart = pollingConfidenceWindowStartRef.current;
+                const windowElapsed = now - windowStart;
                 const samples = pollingConfidenceSamplesRef.current;
-                const windowSpan = samples.length > 1 ? now - samples[0].time : 0;
                 const meanConfidence = samples.length
                     ? samples.reduce((sum, sample) => sum + sample.confidence, 0) / samples.length
                     : 0;
-                const gateProgress = meanConfidence >= documentDetectorConfidenceThreshold
-                    ? Math.min(1, windowSpan / documentDetectorConfidenceGateMs)
-                    : 0;
+                const gateProgress = Math.min(1, windowElapsed / documentDetectorConfidenceGateMs);
                 const gateReady =
-                    windowSpan >= documentDetectorConfidenceGateMs &&
-                    meanConfidence >= documentDetectorConfidenceThreshold;
+                    windowElapsed >= documentDetectorConfidenceGateMs &&
+                    meanConfidence > documentDetectorConfidenceThreshold;
                 const gatedMetrics: SheetDetectionMetrics = {
                     ...metrics,
                     detected: gateReady,
@@ -2008,7 +2017,11 @@ export default function ScannerApp() {
                 if (!busy && gateReady) {
                     pollingDetectionPausedRef.current = true;
                     pollingConfidenceSamplesRef.current = [];
+                    pollingConfidenceWindowStartRef.current = null;
                     setPollingSolveCountdown(pollingSolveDelay);
+                } else if (windowElapsed >= documentDetectorConfidenceGateMs) {
+                    pollingConfidenceSamplesRef.current = [{ time: now, confidence: metrics.modelConfidence }];
+                    pollingConfidenceWindowStartRef.current = now;
                 }
             } catch (error) {
                 console.error("Document detector inference failed", error);
@@ -2064,6 +2077,7 @@ export default function ScannerApp() {
                 upsertPollingSolveItem(item);
                 pollingDetectionPausedRef.current = false;
                 pollingConfidenceSamplesRef.current = [];
+                pollingConfidenceWindowStartRef.current = null;
                 pollingCooldownUntilRef.current = Date.now() + 5000;
             }
         };
@@ -2201,11 +2215,11 @@ export default function ScannerApp() {
         if (documentDetectorStatus === "error") return documentDetectorError || "Document detector error";
         if (pollingDetection.detected) {
             const label = pollingDetection.modelLabel ? `${pollingDetection.modelLabel}, ` : "";
-            return `Stable sheet detected (${label}${Math.round(pollingDetection.modelMeanConfidence * 100)}% mean)`;
+            return `Sheet window accepted (${label}${Math.round(pollingDetection.modelMeanConfidence * 100)}% mean)`;
         }
         if (documentDetectorStatus === "ready") {
-            const stableSeconds = (pollingDetection.modelGateProgress * documentDetectorConfidenceGateMs / 1000).toFixed(1);
-            return `Watching for stable sheet (${Math.round(pollingDetection.modelMeanConfidence * 100)}% mean, ${stableSeconds}/2.0s)`;
+            const windowSeconds = (pollingDetection.modelGateProgress * documentDetectorConfidenceGateMs / 1000).toFixed(1);
+            return `Watching 2s window (${Math.round(pollingDetection.modelMeanConfidence * 100)}% mean, ${windowSeconds}/2.0s)`;
         }
         return "Detector idle";
     })();
@@ -2449,6 +2463,7 @@ export default function ScannerApp() {
                                                     setPollingSolveEnabled((enabled) => {
                                                         pollingDetectionPausedRef.current = false;
                                                         pollingConfidenceSamplesRef.current = [];
+                                                        pollingConfidenceWindowStartRef.current = null;
                                                         setPollingSolveCountdown(null);
                                                         return !enabled;
                                                     });
