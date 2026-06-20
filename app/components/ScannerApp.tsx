@@ -62,6 +62,8 @@ type SheetDetectionMetrics = {
     modelStatus: DocumentDetectorStatus;
     modelLabel: string | null;
     modelConfidence: number;
+    modelMeanConfidence: number;
+    modelGateProgress: number;
     averageBrightness: number;
     darkPixelRatio: number;
     edgeDensity: number;
@@ -183,7 +185,8 @@ const imageSolveStoreName = "results";
 const documentDetectorModelPath = "/models/document-detector.onnx";
 const documentDetectorLabelsPath = "/models/document-detector.labels.json";
 const documentDetectorInputSize = 640;
-const documentDetectorConfidenceThreshold = 0.55;
+const documentDetectorConfidenceThreshold = 0.5;
+const documentDetectorConfidenceGateMs = 2000;
 const documentDetectorWasmPath = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/";
 const documentLabelPattern = /document|paper|sheet|page|invoice|receipt|form/i;
 
@@ -312,6 +315,8 @@ const emptySheetDetection: SheetDetectionMetrics = {
     modelStatus: "idle",
     modelLabel: null,
     modelConfidence: 0,
+    modelMeanConfidence: 0,
+    modelGateProgress: 0,
     averageBrightness: 0,
     darkPixelRatio: 0,
     edgeDensity: 0,
@@ -441,6 +446,8 @@ const analyzeSheetFrame = (
         modelStatus: "idle",
         modelLabel: null,
         modelConfidence: 0,
+        modelMeanConfidence: 0,
+        modelGateProgress: 0,
         averageBrightness,
         darkPixelRatio,
         edgeDensity,
@@ -704,6 +711,8 @@ export default function ScannerApp() {
     const pollingSolveActiveRef = useRef(false);
     const pollingCooldownUntilRef = useRef(0);
     const pollingBaselineRef = useRef<Uint8Array | null>(null);
+    const pollingDetectionPausedRef = useRef(false);
+    const pollingConfidenceSamplesRef = useRef<Array<{ time: number; confidence: number }>>([]);
     const documentDetectorRef = useRef<DocumentDetector | null>(null);
     const documentDetectorLoadIdRef = useRef(0);
 
@@ -854,6 +863,8 @@ export default function ScannerApp() {
 
     const resetPollingBaseline = useCallback(() => {
         pollingBaselineRef.current = null;
+        pollingDetectionPausedRef.current = false;
+        pollingConfidenceSamplesRef.current = [];
         documentDetectorRef.current = null;
         setDocumentDetectorStatus("idle");
         setDocumentDetectorError(null);
@@ -1873,6 +1884,8 @@ export default function ScannerApp() {
         } finally {
             pollingSolveActiveRef.current = false;
             setIsPollingSolveActive(false);
+            pollingDetectionPausedRef.current = false;
+            pollingConfidenceSamplesRef.current = [];
             pollingCooldownUntilRef.current = Date.now() + 5000;
         }
     }, [customSolvePrompt, imageSolvePrimaryProvider, upsertPollingSolveItem]);
@@ -1923,17 +1936,24 @@ export default function ScannerApp() {
     useEffect(() => {
         if (!pollingSolveEnabled || !pollingSolveMode || imageSolveUploadMode) {
             pollingBaselineRef.current = null;
+            pollingDetectionPausedRef.current = false;
+            pollingConfidenceSamplesRef.current = [];
             setPollingDetection(emptySheetDetection);
             return;
         }
 
         if (documentDetectorStatus !== "ready" || !documentDetectorRef.current) {
             setPollingSolveCountdown(null);
+            pollingConfidenceSamplesRef.current = [];
             setPollingDetection({
                 ...emptySheetDetection,
                 baselineReady: documentDetectorStatus === "ready",
                 modelStatus: documentDetectorStatus,
             });
+            return;
+        }
+
+        if (pollingSolveCountdown !== null || pollingDetectionPausedRef.current || pollingSolveActiveRef.current) {
             return;
         }
 
@@ -1950,7 +1970,31 @@ export default function ScannerApp() {
 
             try {
                 const metrics = await detectSheetWithDocumentModel(video, canvas, detector);
-                setPollingDetection(metrics);
+                const now = Date.now();
+                pollingConfidenceSamplesRef.current = [
+                    ...pollingConfidenceSamplesRef.current,
+                    { time: now, confidence: metrics.modelConfidence },
+                ].filter((sample) => now - sample.time <= documentDetectorConfidenceGateMs);
+
+                const samples = pollingConfidenceSamplesRef.current;
+                const windowSpan = samples.length > 1 ? now - samples[0].time : 0;
+                const meanConfidence = samples.length
+                    ? samples.reduce((sum, sample) => sum + sample.confidence, 0) / samples.length
+                    : 0;
+                const gateProgress = meanConfidence >= documentDetectorConfidenceThreshold
+                    ? Math.min(1, windowSpan / documentDetectorConfidenceGateMs)
+                    : 0;
+                const gateReady =
+                    windowSpan >= documentDetectorConfidenceGateMs &&
+                    meanConfidence >= documentDetectorConfidenceThreshold;
+                const gatedMetrics: SheetDetectionMetrics = {
+                    ...metrics,
+                    detected: gateReady,
+                    modelMeanConfidence: meanConfidence,
+                    modelGateProgress: gateProgress,
+                };
+
+                setPollingDetection(gatedMetrics);
 
                 const busy =
                     pollingSolveActiveRef.current ||
@@ -1961,7 +2005,9 @@ export default function ScannerApp() {
                     imageSolveBackupStatus === "solving" ||
                     Date.now() < pollingCooldownUntilRef.current;
 
-                if (!busy && metrics.detected) {
+                if (!busy && gateReady) {
+                    pollingDetectionPausedRef.current = true;
+                    pollingConfidenceSamplesRef.current = [];
                     setPollingSolveCountdown(pollingSolveDelay);
                 }
             } catch (error) {
@@ -1976,7 +2022,7 @@ export default function ScannerApp() {
             } finally {
                 inferenceInFlight = false;
             }
-        }, 650);
+        }, 300);
 
         return () => window.clearInterval(interval);
     }, [
@@ -2016,6 +2062,8 @@ export default function ScannerApp() {
                     backupStatus: "idle",
                 };
                 upsertPollingSolveItem(item);
+                pollingDetectionPausedRef.current = false;
+                pollingConfidenceSamplesRef.current = [];
                 pollingCooldownUntilRef.current = Date.now() + 5000;
             }
         };
@@ -2153,10 +2201,11 @@ export default function ScannerApp() {
         if (documentDetectorStatus === "error") return documentDetectorError || "Document detector error";
         if (pollingDetection.detected) {
             const label = pollingDetection.modelLabel ? `${pollingDetection.modelLabel}, ` : "";
-            return `Sheet detected (${label}${Math.round(pollingDetection.modelConfidence * 100)}%)`;
+            return `Stable sheet detected (${label}${Math.round(pollingDetection.modelMeanConfidence * 100)}% mean)`;
         }
         if (documentDetectorStatus === "ready") {
-            return `Watching for sheet (${Math.round(pollingDetection.modelConfidence * 100)}% confidence)`;
+            const stableSeconds = (pollingDetection.modelGateProgress * documentDetectorConfidenceGateMs / 1000).toFixed(1);
+            return `Watching for stable sheet (${Math.round(pollingDetection.modelMeanConfidence * 100)}% mean, ${stableSeconds}/2.0s)`;
         }
         return "Detector idle";
     })();
@@ -2277,6 +2326,7 @@ export default function ScannerApp() {
                                     onClick={() => {
                                         setImageSolveUploadMode(false);
                                         setPollingSolveMode(true);
+                                        setPollingSolveEnabled(true);
                                         resetPollingBaseline();
                                         clearImageSolveResult();
                                     }}
@@ -2390,17 +2440,16 @@ export default function ScannerApp() {
                                                 <div className={`polling-solve-detection ${pollingDetection.detected ? "detected" : ""}`}>
                                                     {pollingSolveCountdown !== null
                                                         ? `Sheet found. Capturing in ${pollingSolveCountdown}s...`
-                                                        : pollingSolveEnabled
-                                                            ? pollingDetectionLabel
-                                                            : "Polling is paused"}
+                                                        : pollingDetectionLabel}
                                                 </div>
                                             </div>
                                             <button
                                                 className={`image-solve-source-btn ${pollingSolveEnabled ? "active" : ""}`}
                                                 onClick={() => {
                                                     setPollingSolveEnabled((enabled) => {
-                                                        if (!enabled) resetPollingBaseline();
-                                                        else setPollingSolveCountdown(null);
+                                                        pollingDetectionPausedRef.current = false;
+                                                        pollingConfidenceSamplesRef.current = [];
+                                                        setPollingSolveCountdown(null);
                                                         return !enabled;
                                                     });
                                                 }}
@@ -2419,7 +2468,9 @@ export default function ScannerApp() {
 
                                         <div className="polling-solve-metrics">
                                             <span>Detector {documentDetectorStatus}</span>
-                                            <span>Confidence {Math.round(pollingDetection.modelConfidence * 100)}%</span>
+                                            <span>Instant {Math.round(pollingDetection.modelConfidence * 100)}%</span>
+                                            <span>Mean {Math.round(pollingDetection.modelMeanConfidence * 100)}%</span>
+                                            <span>Stable {Math.round(pollingDetection.modelGateProgress * 100)}%</span>
                                             <span>Label {pollingDetection.modelLabel || "-"}</span>
                                             <span>Threshold {Math.round(documentDetectorConfidenceThreshold * 100)}%</span>
                                         </div>
@@ -2444,7 +2495,7 @@ export default function ScannerApp() {
                                             {!isPollingSolveActive && pollingSolveCountdown === null && pollingSolveEnabled && documentDetectorStatus === "missing" && `Add ${documentDetectorModelPath} to enable YOLO sheet detection.`}
                                             {!isPollingSolveActive && pollingSolveCountdown === null && pollingSolveEnabled && documentDetectorStatus === "loading" && 'Loading sheet detector...'}
                                             {!isPollingSolveActive && pollingSolveCountdown === null && pollingSolveEnabled && documentDetectorStatus === "error" && (documentDetectorError || 'Sheet detector failed to load.')}
-                                            {!isPollingSolveActive && pollingSolveCountdown === null && pollingSolveEnabled && documentDetectorStatus === "ready" && 'Hold a question sheet in view to start the timer.'}
+                                            {!isPollingSolveActive && pollingSolveCountdown === null && pollingSolveEnabled && documentDetectorStatus === "ready" && 'Hold a sheet until mean confidence stays above 50% for 2 seconds.'}
                                             {!isPollingSolveActive && pollingSolveCountdown === null && !pollingSolveEnabled && 'Start polling to automatically detect a sheet.'}
                                         </p>
                                     </div>
