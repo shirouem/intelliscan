@@ -568,12 +568,20 @@ const parseYoloDetections = (
         const heightOrY2 = getOutputValue(data, rowIndex, 3, rowCount, colCount, transposed);
         let score = 0;
         let classId = 0;
+        let usesCornerBox = false;
 
         if (colCount === 5) {
             score = getOutputValue(data, rowIndex, 4, rowCount, colCount, transposed);
         } else if (colCount === 6) {
-            score = getOutputValue(data, rowIndex, 4, rowCount, colCount, transposed);
-            classId = Math.max(0, Math.round(getOutputValue(data, rowIndex, 5, rowCount, colCount, transposed)));
+            const objectnessOrScore = getOutputValue(data, rowIndex, 4, rowCount, colCount, transposed);
+            const classOrClassScore = getOutputValue(data, rowIndex, 5, rowCount, colCount, transposed);
+            if (labels.length <= 1 && classOrClassScore >= 0 && classOrClassScore <= 1) {
+                score = objectnessOrScore * classOrClassScore;
+            } else {
+                score = objectnessOrScore;
+                classId = Math.max(0, Math.round(classOrClassScore));
+                usesCornerBox = true;
+            }
         } else {
             const classStart = labels.length > 0 && colCount === labels.length + 4 ? 4 : 5;
             const objectness = classStart === 5
@@ -596,15 +604,14 @@ const parseYoloDetections = (
         const documentLike = !label || labels.length <= 1 || documentLabelPattern.test(label);
         if (!documentLike || !Number.isFinite(score) || score <= 0) continue;
 
-        const looksLikeCorners = widthOrX2 > x && heightOrY2 > y && (widthOrX2 - x) > 1 && (heightOrY2 - y) > 1;
         detections.push({
             label,
             score,
             classId,
-            x: looksLikeCorners ? x : x - widthOrX2 / 2,
-            y: looksLikeCorners ? y : y - heightOrY2 / 2,
-            width: looksLikeCorners ? widthOrX2 - x : widthOrX2,
-            height: looksLikeCorners ? heightOrY2 - y : heightOrY2,
+            x: usesCornerBox ? x : x - widthOrX2 / 2,
+            y: usesCornerBox ? y : y - heightOrY2 / 2,
+            width: usesCornerBox ? widthOrX2 - x : widthOrX2,
+            height: usesCornerBox ? heightOrY2 - y : heightOrY2,
         });
     }
 

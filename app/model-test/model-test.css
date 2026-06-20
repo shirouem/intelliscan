@@ -1,0 +1,136 @@
+.model-test-page {
+    min-height: 100vh;
+    background: #070b12;
+    color: #f5f7fb;
+    padding: 20px;
+}
+
+.model-test-shell {
+    width: min(1120px, 100%);
+    margin: 0 auto;
+}
+
+.model-test-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.model-test-header h1 {
+    font-size: 24px;
+    line-height: 1.1;
+    margin: 0 0 6px;
+}
+
+.model-test-header p {
+    color: #a7b0c0;
+    font-size: 14px;
+    margin: 0;
+}
+
+.model-test-status {
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 999px;
+    color: #d8deea;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 6px 10px;
+    text-transform: uppercase;
+}
+
+.model-test-status.ready {
+    background: rgba(54, 245, 159, 0.12);
+    border-color: rgba(54, 245, 159, 0.35);
+    color: #88ffc5;
+}
+
+.model-test-status.error,
+.model-test-status.missing {
+    background: rgba(255, 84, 112, 0.14);
+    border-color: rgba(255, 84, 112, 0.36);
+    color: #ff9caf;
+}
+
+.model-test-video-wrap {
+    position: relative;
+    width: 100%;
+    overflow: hidden;
+    background: #111824;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+}
+
+.model-test-video {
+    display: block;
+    width: 100%;
+    height: auto;
+}
+
+.model-test-overlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+.model-test-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 14px 0;
+}
+
+.model-test-stats span {
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 999px;
+    color: #c7d0de;
+    font-size: 13px;
+    padding: 6px 10px;
+}
+
+.model-test-detections {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.model-test-empty,
+.model-test-row {
+    color: #c7d0de;
+    font-size: 14px;
+    padding: 10px 12px;
+}
+
+.model-test-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.model-test-row:first-child {
+    border-top: 0;
+}
+
+.model-test-row span:first-child {
+    color: #f5f7fb;
+    font-weight: 700;
+}
+
+@media (max-width: 640px) {
+    .model-test-page {
+        padding: 12px;
+    }
+
+    .model-test-header {
+        flex-direction: column;
+    }
+
+    .model-test-row {
+        grid-template-columns: 1fr;
+        gap: 4px;
+    }
+}
