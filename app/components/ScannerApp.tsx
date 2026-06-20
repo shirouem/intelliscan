@@ -1889,9 +1889,14 @@ export default function ScannerApp() {
             pollingDetectionPausedRef.current = false;
             pollingConfidenceSamplesRef.current = [];
             pollingConfidenceWindowStartRef.current = null;
+            setPollingDetection({
+                ...emptySheetDetection,
+                baselineReady: true,
+                modelStatus: documentDetectorRef.current ? "ready" : documentDetectorStatus,
+            });
             pollingCooldownUntilRef.current = Date.now() + 5000;
         }
-    }, [customSolvePrompt, imageSolvePrimaryProvider, upsertPollingSolveItem]);
+    }, [customSolvePrompt, documentDetectorStatus, imageSolvePrimaryProvider, upsertPollingSolveItem]);
 
     useEffect(() => {
         if (!pollingSolveMode || imageSolveUploadMode) {
@@ -2045,6 +2050,7 @@ export default function ScannerApp() {
         documentDetectorStatus,
         pollingSolveCountdown,
         pollingSolveDelay,
+        isPollingSolveActive,
         imageSolveStatus,
         imageSolveBackupStatus,
     ]);
@@ -2078,12 +2084,17 @@ export default function ScannerApp() {
                 pollingDetectionPausedRef.current = false;
                 pollingConfidenceSamplesRef.current = [];
                 pollingConfidenceWindowStartRef.current = null;
+                setPollingDetection({
+                    ...emptySheetDetection,
+                    baselineReady: true,
+                    modelStatus: documentDetectorRef.current ? "ready" : documentDetectorStatus,
+                });
                 pollingCooldownUntilRef.current = Date.now() + 5000;
             }
         };
 
         runCapture();
-    }, [pollingSolveCountdown, captureHighQualityFrame, solvePollingImage, imageSolvePrimaryProvider, upsertPollingSolveItem]);
+    }, [pollingSolveCountdown, captureHighQualityFrame, solvePollingImage, imageSolvePrimaryProvider, upsertPollingSolveItem, documentDetectorStatus]);
 
     const handleFileUpload = useCallback((file: File) => {
         if (!file.type.startsWith("image/")) return;
