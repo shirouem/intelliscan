@@ -252,7 +252,7 @@ export default function ModelTestPage() {
             video: {
                 width: { ideal: 1920 },
                 height: { ideal: 1080 },
-                facingMode: { ideal: "environment" },
+                facingMode: { ideal: "user" },
             },
         });
         streamRef.current = stream;
