@@ -107,6 +107,7 @@ type CaptureFrameOptions = {
     maxWidth: number;
     maxHeight: number;
     maxDataUrlLength: number;
+    mirrorHorizontal?: boolean;
 };
 
 const scanCaptureOptions: CaptureFrameOptions = {
@@ -125,6 +126,7 @@ const imageSolveCaptureOptions: CaptureFrameOptions = {
     maxWidth: 1920,
     maxHeight: 1440,
     maxDataUrlLength: 3_200_000,
+    mirrorHorizontal: true,
 };
 
 const getErrorMessage = (error: unknown, fallback = "Image solve failed.") => {
@@ -1008,7 +1010,7 @@ export default function ScannerApp() {
         if (!video) return null;
 
         if (video.videoWidth && video.videoHeight) {
-            const canvas = drawCaptureToCanvas(video, video.videoWidth, video.videoHeight, false, options);
+            const canvas = drawCaptureToCanvas(video, video.videoWidth, video.videoHeight, Boolean(options.mirrorHorizontal), options);
             console.log(`Captured video frame at ${video.videoWidth}x${video.videoHeight}`);
             return encodeCanvasWithinLimit(canvas, options);
         }
