@@ -73,20 +73,20 @@ const ALL_SOLVE_PROVIDERS: { id: string; label: string }[] = [
 // ─── Capture options ──────────────────────────────────────────────────────────
 const scanCaptureOptions: CaptureFrameOptions = {
     mimeType: "image/jpeg",
-    quality: 0.92,
-    minQuality: 0.72,
-    maxWidth: 1920,
-    maxHeight: 1440,
-    maxDataUrlLength: 3_200_000,
+    quality: 0.82,
+    minQuality: 0.55,
+    maxWidth: 1280,
+    maxHeight: 1280,
+    maxDataUrlLength: 800_000,
 };
 
 const imageSolveCaptureOptions: CaptureFrameOptions = {
     mimeType: "image/jpeg",
-    quality: 0.92,
-    minQuality: 0.72,
-    maxWidth: 1920,
-    maxHeight: 1440,
-    maxDataUrlLength: 3_200_000,
+    quality: 0.82,
+    minQuality: 0.55,
+    maxWidth: 1280,
+    maxHeight: 1280,
+    maxDataUrlLength: 800_000,
     mirrorHorizontal: true,
 };
 
