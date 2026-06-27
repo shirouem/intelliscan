@@ -83,18 +83,18 @@ export async function POST(req: NextRequest) {
 
                 const errMsg = "Browser service returned no answer or screenshot.";
                 console.warn("[image-solve]", errMsg);
-                return NextResponse.json({ error: errMsg }, { status: 502 });
+                return NextResponse.json({ error: errMsg, status: "browser_failed" });
             }
 
             const errData = await browserRes.json().catch(() => ({})) as { error?: string };
             const errMsg = errData.error || `Browser service returned HTTP ${browserRes.status}`;
             console.warn("[image-solve] Browser service error:", errMsg);
-            return NextResponse.json({ error: errMsg }, { status: 502 });
+            return NextResponse.json({ error: errMsg, status: "browser_failed" });
 
         } catch (browserErr: unknown) {
             const errMsg = getErrorMessage(browserErr, "Browser service unavailable.");
             console.warn("[image-solve] Browser service unavailable:", errMsg);
-            return NextResponse.json({ error: errMsg }, { status: 503 });
+            return NextResponse.json({ error: errMsg, status: "browser_failed" });
         }
 
     } catch (error: unknown) {
