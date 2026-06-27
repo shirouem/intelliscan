@@ -2,10 +2,10 @@ import { NextResponse } from "next/server";
 
 export async function DELETE(
     request: Request,
-    { params }: { params: { jobId: string } }
+    context: { params: Promise<{ jobId: string }> }
 ) {
     const browserServiceUrl = process.env.BROWSER_SERVICE_URL || "http://localhost:3001";
-    const jobId = params.jobId;
+    const { jobId } = await context.params;
 
     try {
         const res = await fetch(`${browserServiceUrl}/image-solve/${jobId}`, {

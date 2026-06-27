@@ -178,6 +178,7 @@ export default function ScannerApp() {
 
     // ── Image Solve mode ──────────────────────────────────────────────────────
     const [imageSolveMode, setImageSolveMode] = useState(false);
+    const [imageSolveJobId, setImageSolveJobId] = useState<string | null>(null);
     const [imageSolveStatus, setImageSolveStatus] = useState<"idle" | "capturing" | "solving" | "done" | "error">("idle");
     const [imageSolveAnswer, setImageSolveAnswer] = useState<string | null>(null);
     const [imageSolveScreenshot, setImageSolveScreenshot] = useState<string | null>(null);
@@ -567,6 +568,7 @@ export default function ScannerApp() {
         setImageSolveBrowserError(null);
         setImageSolveAnswerProvider(null);
         setImageSolveBackupProvider(null);
+        setImageSolveJobId(null);
         setImageSolveCountdown(null);
         setExpandedSolverScreenshot(null);
     }, []);
@@ -651,6 +653,10 @@ export default function ScannerApp() {
 
             if (!response.ok || (data.error && !data.jobId && !data.fallbackRequired)) {
                 throw new Error(data.error || `Server returned ${response.status}`);
+            }
+
+            if (data.jobId) {
+                setImageSolveJobId(data.jobId);
             }
 
             const applyImageSolveData = (statusData: ImageSolveStatusData) => {
@@ -802,6 +808,10 @@ export default function ScannerApp() {
 
             if (!response.ok || (data.error && !data.jobId && !data.fallbackRequired)) {
                 throw new Error(data.error || `Server returned ${response.status}`);
+            }
+
+            if (data.jobId) {
+                setImageSolveJobId(data.jobId);
             }
 
             const applyData = (statusData: ImageSolveStatusData) => {
