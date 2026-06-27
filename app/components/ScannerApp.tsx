@@ -34,12 +34,13 @@ type ImageSolveStatusData = {
 };
 
 type StoredImageSolveItem = {
-    id: string;
+    jobId: string;
+    id: string; // fallback mapped to jobId
     createdAt: string;
-    image: string;
-    status: "capturing" | "solving" | "done" | "error";
+    image: string; // mapped to URL
+    status: "capturing" | "solving" | "done" | "error" | "superseded" | "primary_done" | "fallback_solving" | "backup_solving";
     primaryProvider: string;
-    source: "camera" | "upload";
+    source: "camera" | "upload" | "browser";
     prompt?: string;
     answer?: string | null;
     screenshot?: string | null;
@@ -138,56 +139,7 @@ const readImageSolveResponse = async (response: Response): Promise<ImageSolveSta
     }
 };
 
-// ─── IndexedDB ────────────────────────────────────────────────────────────────
-const imageSolveDbName = "intelliscan_image_solve";
-const imageSolveStoreName = "results";
-
-const openImageSolveDb = () => new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(imageSolveDbName, 1);
-    request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains(imageSolveStoreName)) {
-            db.createObjectStore(imageSolveStoreName, { keyPath: "id" });
-        }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-});
-
-const loadImageSolveItems = async () => {
-    const db = await openImageSolveDb();
-    return new Promise<StoredImageSolveItem[]>((resolve, reject) => {
-        const tx = db.transaction(imageSolveStoreName, "readonly");
-        const request = tx.objectStore(imageSolveStoreName).getAll();
-        request.onsuccess = () => {
-            const items = (request.result as StoredImageSolveItem[])
-                .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-            resolve(items);
-        };
-        request.onerror = () => reject(request.error);
-        tx.oncomplete = () => db.close();
-    });
-};
-
-const saveImageSolveItem = async (item: StoredImageSolveItem) => {
-    const db = await openImageSolveDb();
-    return new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(imageSolveStoreName, "readwrite");
-        tx.objectStore(imageSolveStoreName).put(item);
-        tx.oncomplete = () => { db.close(); resolve(); };
-        tx.onerror = () => { db.close(); reject(tx.error); };
-    });
-};
-
-const clearImageSolveItems = async () => {
-    const db = await openImageSolveDb();
-    return new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(imageSolveStoreName, "readwrite");
-        tx.objectStore(imageSolveStoreName).clear();
-        tx.oncomplete = () => { db.close(); resolve(); };
-        tx.onerror = () => { db.close(); reject(tx.error); };
-    });
-};
+// ─── DB code removed for global history ────────────────────────────────────────
 
 // ─── Component ───────────────────────────────────────────────────────────────
 export default function ScannerApp() {
@@ -315,38 +267,42 @@ export default function ScannerApp() {
     }, [savedQuestions, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, isLoaded]);
 
     // ── Load image solve history ──────────────────────────────────────────────
+    const fetchHistory = useCallback(async () => {
+        try {
+            const res = await fetch("/api/image-solve/history");
+            if (res.ok) {
+                const data = await res.json();
+                if (data.history) {
+                    const mapped: StoredImageSolveItem[] = data.history.map((job: any) => {
+                        let imageUrl = "";
+                        if (job.imageSolveCapture && job.imageSolveCapture.filename) {
+                            imageUrl = `/api/image-solve/captures/${job.imageSolveCapture.filename}`;
+                        }
+                        return {
+                            ...job,
+                            id: job.jobId,
+                            image: imageUrl,
+                            source: "browser",
+                            primaryProvider: job.provider,
+                            answerProvider: job.primaryAnswer ? job.provider : job.backupProvider,
+                            status: job.status,
+                            createdAt: job.createdAt || new Date().toISOString(),
+                        };
+                    });
+                    setImageSolveResults(mapped);
+                }
+            }
+        } catch (error) {
+            console.error("Failed to load global history", error);
+        } finally {
+            setIsImageSolveResultsLoaded(true);
+        }
+    }, []);
+
     useEffect(() => {
         if (!mounted) return;
-        loadImageSolveItems()
-            .then((items) => {
-                setImageSolveResults(items);
-                setIsImageSolveResultsLoaded(true);
-            })
-            .catch((error) => {
-                console.error("Failed to load image solve results", error);
-                setIsImageSolveResultsLoaded(true);
-            });
-    }, [mounted]);
-
-    // ── DB helpers ────────────────────────────────────────────────────────────
-    const upsertImageSolveItem = useCallback((item: StoredImageSolveItem) => {
-        setImageSolveResults((prev) => {
-            const withoutCurrent = prev.filter((e) => e.id !== item.id);
-            return [item, ...withoutCurrent].sort(
-                (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-            );
-        });
-        saveImageSolveItem(item).catch((error) => {
-            console.error("Failed to save image solve result", error);
-        });
-    }, []);
-
-    const clearImageSolveStack = useCallback(() => {
-        setImageSolveResults([]);
-        clearImageSolveItems().catch((error) => {
-            console.error("Failed to clear image solve results", error);
-        });
-    }, []);
+        fetchHistory();
+    }, [mounted, fetchHistory]);
 
     // ── Camera ────────────────────────────────────────────────────────────────
     const stopCamera = useCallback(() => {
@@ -628,13 +584,7 @@ export default function ScannerApp() {
         const requestBackupProvider = (enabledProviders[1] ?? null) as ImageSolveProvider | null;
         setImageSolveBackupProvider(requestBackupProvider);
 
-        let currentImageSolveItem: StoredImageSolveItem | null = null;
-
-        const persistImageSolvePatch = (patch: Partial<StoredImageSolveItem>) => {
-            if (!currentImageSolveItem) return;
-            currentImageSolveItem = { ...currentImageSolveItem, ...patch };
-            upsertImageSolveItem(currentImageSolveItem);
-        };
+        // Global polling will pick up the new job automatically, so we don't upsert locally.
 
         let base64Image: string | null = null;
         try {
@@ -669,18 +619,6 @@ export default function ScannerApp() {
         setLastSolvedImageBase64(base64Image);
         setLastSolvedPrompt(customSolvePrompt);
 
-        currentImageSolveItem = {
-            id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            createdAt: new Date().toISOString(),
-            image: base64Image,
-            source: "camera",
-            status: "solving",
-            primaryProvider: requestPrimaryProvider,
-            prompt: customSolvePrompt,
-            backupStatus: "idle",
-            backupProvider: requestBackupProvider,
-        };
-        upsertImageSolveItem(currentImageSolveItem);
         setImageSolveStatus("solving");
 
         try {
@@ -712,7 +650,6 @@ export default function ScannerApp() {
 
                 if (browserError) {
                     setImageSolveBrowserError(browserError);
-                    persistImageSolvePatch({ browserError });
                 }
 
                 const primaryAnswer = statusData.primaryAnswer || statusData.answer;
@@ -723,59 +660,45 @@ export default function ScannerApp() {
                     setImageSolveScreenshot(primaryScreenshot);
                     setImageSolveAnswerProvider(resultProvider);
                     setImageSolveStatus("done");
-                    persistImageSolvePatch({ screenshot: primaryScreenshot, answerProvider: resultProvider, status: "done" });
                 }
 
                 if (primaryAnswer) {
                     setImageSolveAnswer(primaryAnswer);
                     setImageSolveAnswerProvider(resultProvider);
                     setImageSolveStatus("done");
-                    persistImageSolvePatch({ answer: primaryAnswer, answerProvider: resultProvider, status: "done" });
                 }
 
                 if (statusData.backupStatus) {
                     setImageSolveBackupStatus(statusData.backupStatus);
-                    persistImageSolvePatch({ backupStatus: statusData.backupStatus });
                 }
 
                 const normalizedBackupProvider = normalizeImageSolveProvider(statusData.backupProvider);
                 if (normalizedBackupProvider) {
                     setImageSolveBackupProvider(normalizedBackupProvider);
-                    persistImageSolvePatch({ backupProvider: normalizedBackupProvider });
                 }
 
                 if (statusData.backupAnswer) {
                     setImageSolveBackupAnswer(statusData.backupAnswer);
                     setImageSolveBackupStatus("done");
-                    persistImageSolvePatch({ backupAnswer: statusData.backupAnswer, backupStatus: "done" });
                 }
 
                 if (statusData.backupScreenshot) {
                     setImageSolveBackupScreenshot(statusData.backupScreenshot);
                     setImageSolveBackupStatus("done");
-                    const patch: Partial<StoredImageSolveItem> = {
-                        backupScreenshot: statusData.backupScreenshot,
-                        backupStatus: "done",
-                    };
                     if (!primaryScreenshot && !primaryAnswer) {
                         setImageSolveAnswerProvider(normalizedBackupProvider || statusData.provider || requestBackupProvider);
                         setImageSolveStatus("done");
-                        patch.answerProvider = normalizedBackupProvider || statusData.provider || requestBackupProvider;
-                        patch.status = "done";
                     }
-                    persistImageSolvePatch(patch);
                 }
 
                 if (statusData.backupError) {
                     setImageSolveBackupError(statusData.backupError);
                     setImageSolveBackupStatus("error");
-                    persistImageSolvePatch({ backupError: statusData.backupError, backupStatus: "error" });
                 }
 
                 if (!primaryAnswer && !primaryScreenshot && statusData.status === "error") {
                     setImageSolveError(statusData.error || "Image solve failed.");
                     setImageSolveStatus("error");
-                    persistImageSolvePatch({ error: statusData.error || "Image solve failed.", status: "error" });
                     return true;
                 }
 
@@ -792,7 +715,6 @@ export default function ScannerApp() {
 
             if (data.fallbackRequired) {
                 setImageSolveBackupStatus("solving");
-                persistImageSolvePatch({ backupStatus: "solving" });
 
                 const fallbackResponse = await fetch("/api/image-solve", {
                     method: "POST",
@@ -813,12 +735,10 @@ export default function ScannerApp() {
                     const fallbackError = fallbackData.error || `Fallback returned ${fallbackResponse.status}`;
                     setImageSolveBackupStatus("error");
                     setImageSolveBackupError(fallbackError);
-                    persistImageSolvePatch({ backupStatus: "error", backupError: fallbackError });
                     throw new Error(fallbackError);
                 }
 
                 setImageSolveBackupStatus("done");
-                persistImageSolvePatch({ backupStatus: "done" });
                 applyImageSolveData(fallbackData);
                 return;
             }
@@ -840,20 +760,14 @@ export default function ScannerApp() {
                 setImageSolveAnswer(data.answer || "(No answer returned)");
                 setImageSolveAnswerProvider(data.provider || data.source || null);
                 setImageSolveStatus("done");
-                persistImageSolvePatch({
-                    answer: data.answer || "(No answer returned)",
-                    answerProvider: data.provider || data.source || requestPrimaryProvider,
-                    status: "done",
-                });
             }
         } catch (err: unknown) {
             if (!isCurrentRun()) return;
             const message = getErrorMessage(err);
             setImageSolveError(message);
             setImageSolveStatus("error");
-            persistImageSolvePatch({ error: message, status: "error" });
         }
-    }, [imageSolveStatus, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, captureHighQualityFrame, upsertImageSolveItem]);
+    }, [imageSolveStatus, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, captureHighQualityFrame]);
 
     // ── Image Solve: solve from image (upload or retry) ───────────────────────
     const solveWithUploadedImage = useCallback(async (base64Image: string, promptOverride?: string) => {
@@ -886,24 +800,7 @@ export default function ScannerApp() {
         setLastSolvedImageBase64(base64Image);
         setLastSolvedPrompt(solvePrompt);
 
-        let currentImageSolveItem: StoredImageSolveItem = {
-            id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            createdAt: new Date().toISOString(),
-            image: base64Image,
-            source: "upload",
-            status: "solving",
-            primaryProvider: requestPrimaryProvider,
-            prompt: solvePrompt,
-            backupStatus: "idle",
-            backupProvider: requestBackupProvider,
-        };
-
-        const persistImageSolvePatch = (patch: Partial<StoredImageSolveItem>) => {
-            currentImageSolveItem = { ...currentImageSolveItem, ...patch };
-            upsertImageSolveItem(currentImageSolveItem);
-        };
-
-        upsertImageSolveItem(currentImageSolveItem);
+        // Global polling will pick up the new job automatically, so we don't upsert locally.
 
         try {
             const response = await fetch("/api/image-solve", {
@@ -931,7 +828,6 @@ export default function ScannerApp() {
                     (!statusData.primaryAnswer && statusData.error ? statusData.error : null);
                 if (browserError) {
                     setImageSolveBrowserError(browserError);
-                    persistImageSolvePatch({ browserError });
                 }
                 const primaryAnswer = statusData.primaryAnswer || statusData.answer;
                 const primaryScreenshot = statusData.primaryScreenshot;
@@ -940,53 +836,39 @@ export default function ScannerApp() {
                     setImageSolveScreenshot(primaryScreenshot);
                     setImageSolveAnswerProvider(resultProvider);
                     setImageSolveStatus("done");
-                    persistImageSolvePatch({ screenshot: primaryScreenshot, answerProvider: resultProvider, status: "done" });
                 }
                 if (primaryAnswer) {
                     setImageSolveAnswer(primaryAnswer);
                     setImageSolveAnswerProvider(resultProvider);
                     setImageSolveStatus("done");
-                    persistImageSolvePatch({ answer: primaryAnswer, answerProvider: resultProvider, status: "done" });
                 }
                 if (statusData.backupStatus) {
                     setImageSolveBackupStatus(statusData.backupStatus);
-                    persistImageSolvePatch({ backupStatus: statusData.backupStatus });
                 }
                 const normBackup = normalizeImageSolveProvider(statusData.backupProvider);
                 if (normBackup) {
                     setImageSolveBackupProvider(normBackup);
-                    persistImageSolvePatch({ backupProvider: normBackup });
                 }
                 if (statusData.backupAnswer) {
                     setImageSolveBackupAnswer(statusData.backupAnswer);
                     setImageSolveBackupStatus("done");
-                    persistImageSolvePatch({ backupAnswer: statusData.backupAnswer, backupStatus: "done" });
                 }
                 if (statusData.backupScreenshot) {
                     setImageSolveBackupScreenshot(statusData.backupScreenshot);
                     setImageSolveBackupStatus("done");
-                    const patch: Partial<StoredImageSolveItem> = {
-                        backupScreenshot: statusData.backupScreenshot,
-                        backupStatus: "done",
-                    };
                     if (!primaryScreenshot && !primaryAnswer) {
                         setImageSolveAnswerProvider(normBackup || statusData.provider || requestBackupProvider);
                         setImageSolveStatus("done");
-                        patch.answerProvider = normBackup || statusData.provider || requestBackupProvider;
-                        patch.status = "done";
                     }
-                    persistImageSolvePatch(patch);
                 }
                 if (statusData.backupError) {
                     setImageSolveBackupError(statusData.backupError);
                     setImageSolveBackupStatus("error");
-                    persistImageSolvePatch({ backupError: statusData.backupError, backupStatus: "error" });
                 }
                 if (!primaryAnswer && !primaryScreenshot && statusData.status === "error") {
                     const message = statusData.error || "Image solve failed.";
                     setImageSolveError(message);
                     setImageSolveStatus("error");
-                    persistImageSolvePatch({ error: message, status: "error" });
                     return true;
                 }
                 return (
@@ -1002,7 +884,6 @@ export default function ScannerApp() {
 
             if (data.fallbackRequired) {
                 setImageSolveBackupStatus("solving");
-                persistImageSolvePatch({ backupStatus: "solving" });
                 const fallbackResponse = await fetch("/api/image-solve", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -1020,11 +901,9 @@ export default function ScannerApp() {
                     const fallbackError = fallbackData.error || `Fallback returned ${fallbackResponse.status}`;
                     setImageSolveBackupStatus("error");
                     setImageSolveBackupError(fallbackError);
-                    persistImageSolvePatch({ backupStatus: "error", backupError: fallbackError });
                     throw new Error(fallbackError);
                 }
                 setImageSolveBackupStatus("done");
-                persistImageSolvePatch({ backupStatus: "done" });
                 applyData(fallbackData);
                 return;
             }
@@ -1043,20 +922,16 @@ export default function ScannerApp() {
                 setImageSolveAnswer(data.answer || "(No answer returned)");
                 setImageSolveAnswerProvider(data.provider || data.source || null);
                 setImageSolveStatus("done");
-                persistImageSolvePatch({
-                    answer: data.answer || "(No answer returned)",
-                    answerProvider: data.provider || data.source || requestPrimaryProvider,
-                    status: "done",
-                });
             }
         } catch (err: unknown) {
             if (!isCurrentRun()) return;
             const message = getErrorMessage(err);
             setImageSolveError(message);
             setImageSolveStatus("error");
-            persistImageSolvePatch({ error: message, status: "error" });
+            setImageSolveError(message);
+            setImageSolveStatus("error");
         }
-    }, [imageSolveStatus, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, upsertImageSolveItem]);
+    }, [imageSolveStatus, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled]);
 
     // ── Retry current result ──────────────────────────────────────────────────
     const handleRetry = useCallback(() => {
@@ -1167,23 +1042,19 @@ export default function ScannerApp() {
         }
     };
 
-    // ── Provider drag-and-drop ────────────────────────────────────────────────
-    const handleProviderDragStart = (index: number) => {
-        providerDragIndexRef.current = index;
+    // ── Provider Reordering ───────────────────────────────────────────────────
+    const moveProviderUp = (index: number) => {
+        if (index <= 0) return;
+        const newOrder = [...imageSolveProviderOrder];
+        [newOrder[index - 1], newOrder[index]] = [newOrder[index], newOrder[index - 1]];
+        setImageSolveProviderOrder(newOrder);
     };
 
-    const handleProviderDrop = (toIndex: number) => {
-        const fromIndex = providerDragIndexRef.current;
-        if (fromIndex === null || fromIndex === toIndex) {
-            setProviderDragOver(null);
-            return;
-        }
+    const moveProviderDown = (index: number) => {
+        if (index >= imageSolveProviderOrder.length - 1) return;
         const newOrder = [...imageSolveProviderOrder];
-        const [moved] = newOrder.splice(fromIndex, 1);
-        newOrder.splice(toIndex, 0, moved);
+        [newOrder[index], newOrder[index + 1]] = [newOrder[index + 1], newOrder[index]];
         setImageSolveProviderOrder(newOrder);
-        setProviderDragOver(null);
-        providerDragIndexRef.current = null;
     };
 
     // ── Misc scan helpers ─────────────────────────────────────────────────────
@@ -1412,7 +1283,7 @@ export default function ScannerApp() {
 
                             {/* ── Provider Setup ── */}
                             <div className="provider-setup">
-                                <div className="provider-setup-label">Providers <span className="provider-setup-hint">(drag to reorder · check to enable)</span></div>
+                                <div className="provider-setup-label">Providers <span className="provider-setup-hint">(use arrows to reorder · check to enable)</span></div>
                                 <div className="provider-list">
                                     {imageSolveProviderOrder.map((providerId, index) => {
                                         const providerInfo = ALL_SOLVE_PROVIDERS.find(p => p.id === providerId);
@@ -1422,14 +1293,22 @@ export default function ScannerApp() {
                                         return (
                                             <div
                                                 key={providerId}
-                                                className={`provider-list-item${providerDragOver === index ? ' drag-over' : ''}${!isEnabled ? ' disabled-provider' : ''}`}
-                                                draggable={!imageSolveSelectorLocked}
-                                                onDragStart={() => handleProviderDragStart(index)}
-                                                onDragOver={(e) => { e.preventDefault(); setProviderDragOver(index); }}
-                                                onDragEnd={() => { setProviderDragOver(null); providerDragIndexRef.current = null; }}
-                                                onDrop={() => handleProviderDrop(index)}
+                                                className={`provider-list-item${!isEnabled ? ' disabled-provider' : ''}`}
                                             >
-                                                <span className="provider-drag-handle" title="Drag to reorder">⠿</span>
+                                                <div className="provider-reorder-actions">
+                                                    <button 
+                                                        className="reorder-btn" 
+                                                        onClick={() => moveProviderUp(index)}
+                                                        disabled={index === 0 || imageSolveSelectorLocked}
+                                                        title="Move Up"
+                                                    >▲</button>
+                                                    <button 
+                                                        className="reorder-btn" 
+                                                        onClick={() => moveProviderDown(index)}
+                                                        disabled={index === imageSolveProviderOrder.length - 1 || imageSolveSelectorLocked}
+                                                        title="Move Down"
+                                                    >▼</button>
+                                                </div>
                                                 <input
                                                     type="checkbox"
                                                     id={`provider-chk-${providerId}`}
@@ -1629,12 +1508,7 @@ export default function ScannerApp() {
                             {/* Image Solve History Stack */}
                             <div className="polling-results-panel image-solve-history-panel">
                                 <div className="polling-results-header">
-                                    <span>Image Solve Stack ({imageSolveResults.length})</span>
-                                    {imageSolveResults.length > 0 && (
-                                        <button className="delete-btn" onClick={clearImageSolveStack}>
-                                            Clear
-                                        </button>
-                                    )}
+                                    <span>Global Image Solve Stack ({imageSolveResults.length})</span>
                                 </div>
                                 {!isImageSolveResultsLoaded && (
                                     <div className="polling-results-empty">Loading saved image solves...</div>

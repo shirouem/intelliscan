@@ -850,28 +850,35 @@
     background: hsla(0, 0%, 100%, 0.07);
     border-color: hsla(0, 0%, 100%, 0.18);
 }
-
-.provider-list-item.drag-over {
-    border-color: hsl(var(--accent-secondary));
-    background: hsla(var(--accent-secondary) / 0.1);
-}
-
 .provider-list-item.disabled-provider {
     opacity: 0.48;
 }
 
-.provider-drag-handle {
-    font-size: 1rem;
-    color: hsla(0, 0%, 100%, 0.3);
-    cursor: grab;
-    padding: 0 0.1rem;
-    line-height: 1;
+.provider-reorder-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
     flex-shrink: 0;
-    font-family: monospace;
 }
 
-.provider-drag-handle:active {
-    cursor: grabbing;
+.reorder-btn {
+    background: transparent;
+    border: none;
+    padding: 0 0.2rem;
+    color: hsla(0, 0%, 100%, 0.3);
+    cursor: pointer;
+    font-size: 0.65rem;
+    line-height: 1;
+    transition: color 0.15s;
+}
+
+.reorder-btn:hover:not(:disabled) {
+    color: hsl(var(--text-primary));
+}
+
+.reorder-btn:disabled {
+    opacity: 0.2;
+    cursor: default;
 }
 
 .provider-list-label {
