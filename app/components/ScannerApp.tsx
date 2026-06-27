@@ -1488,21 +1488,6 @@ export default function ScannerApp() {
                         </>
                     )}
 
-                    {/* Screenshot expanded overlay */}
-                    {expandedSolverScreenshot && (
-                        <div className="solver-screenshot-overlay" onClick={() => setExpandedSolverScreenshot(null)}>
-                            <div className="solver-screenshot-expanded" onClick={(e) => e.stopPropagation()}>
-                                <div className="solver-screenshot-expanded-title">{expandedSolverScreenshot.label}</div>
-                                <img src={expandedSolverScreenshot.src} alt={expandedSolverScreenshot.label} />
-                                <button
-                                    className="solver-screenshot-close"
-                                    onClick={() => setExpandedSolverScreenshot(null)}
-                                >
-                                    Close
-                                </button>
-                            </div>
-                        </div>
-                    )}
 
                     <button
                         className="settings-btn"
@@ -1769,6 +1754,22 @@ export default function ScannerApp() {
                     )}
                 </div>}
             </div>
+
+            {/* Screenshot expanded overlay */}
+            {expandedSolverScreenshot && (
+                <div className="solver-screenshot-overlay" onClick={() => setExpandedSolverScreenshot(null)}>
+                    <div className="solver-screenshot-expanded" onClick={(e) => e.stopPropagation()}>
+                        <div className="solver-screenshot-expanded-title">{expandedSolverScreenshot.label}</div>
+                        <img src={expandedSolverScreenshot.src} alt={expandedSolverScreenshot.label} />
+                        <button
+                            className="solver-screenshot-close"
+                            onClick={() => setExpandedSolverScreenshot(null)}
+                        >
+                            Close
+                        </button>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
