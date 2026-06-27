@@ -345,9 +345,18 @@ export default function ScannerApp() {
                 await video.play();
             }
 
+            // Auto-restart if the hardware track dies (e.g. camera taken by another app)
             const track = stream.getVideoTracks()[0];
-            const settings = track?.getSettings();
-            console.log(`Camera stream active at ${settings?.width || "?"}x${settings?.height || "?"}`);
+            if (track) {
+                const settings = track.getSettings();
+                console.log(`Camera stream active at ${settings?.width || "?"}x${settings?.height || "?"}`);
+                track.addEventListener("ended", () => {
+                    if (cameraRunIdRef.current === runId) {
+                        console.warn("Camera track ended unexpectedly, restarting...");
+                        startCamera();
+                    }
+                });
+            }
         } catch (error) {
             const message = getErrorMessage(error, "Could not start camera.");
             console.error("Camera start error:", error);
@@ -713,36 +722,6 @@ export default function ScannerApp() {
 
             applyImageSolveData(data);
 
-            if (data.fallbackRequired) {
-                setImageSolveBackupStatus("solving");
-
-                const fallbackResponse = await fetch("/api/image-solve", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        image: base64Image,
-                        prompt: customSolvePrompt,
-                        primaryProvider: requestPrimaryProvider,
-                        useFallbackOnly: true,
-                        browserError: data.browserError || data.primaryError || data.error,
-                    }),
-                });
-                const fallbackData = await readImageSolveResponse(fallbackResponse);
-
-                if (!isCurrentRun()) return;
-
-                if (!fallbackResponse.ok) {
-                    const fallbackError = fallbackData.error || `Fallback returned ${fallbackResponse.status}`;
-                    setImageSolveBackupStatus("error");
-                    setImageSolveBackupError(fallbackError);
-                    throw new Error(fallbackError);
-                }
-
-                setImageSolveBackupStatus("done");
-                applyImageSolveData(fallbackData);
-                return;
-            }
-
             if (data.jobId) {
                 const pollInterval = setInterval(async () => {
                     try {
@@ -882,32 +861,6 @@ export default function ScannerApp() {
 
             applyData(data);
 
-            if (data.fallbackRequired) {
-                setImageSolveBackupStatus("solving");
-                const fallbackResponse = await fetch("/api/image-solve", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        image: base64Image,
-                        prompt: solvePrompt,
-                        primaryProvider: requestPrimaryProvider,
-                        useFallbackOnly: true,
-                        browserError: data.browserError || data.primaryError || data.error,
-                    }),
-                });
-                const fallbackData = await readImageSolveResponse(fallbackResponse);
-                if (!isCurrentRun()) return;
-                if (!fallbackResponse.ok) {
-                    const fallbackError = fallbackData.error || `Fallback returned ${fallbackResponse.status}`;
-                    setImageSolveBackupStatus("error");
-                    setImageSolveBackupError(fallbackError);
-                    throw new Error(fallbackError);
-                }
-                setImageSolveBackupStatus("done");
-                applyData(fallbackData);
-                return;
-            }
-
             if (data.jobId) {
                 const pollInterval = setInterval(async () => {
                     try {
@@ -926,8 +879,6 @@ export default function ScannerApp() {
         } catch (err: unknown) {
             if (!isCurrentRun()) return;
             const message = getErrorMessage(err);
-            setImageSolveError(message);
-            setImageSolveStatus("error");
             setImageSolveError(message);
             setImageSolveStatus("error");
         }
@@ -1176,9 +1127,32 @@ export default function ScannerApp() {
                         autoPlay
                         muted
                         playsInline
+                        onError={() => {
+                            console.warn("Video element error — restarting camera.");
+                            startCamera();
+                        }}
                     />
                     {cameraError && (
-                        <div className="camera-error-overlay">{cameraError}</div>
+                        <div className="camera-error-overlay">
+                            <div>
+                                <div style={{ marginBottom: '0.75rem' }}>{cameraError}</div>
+                                <button
+                                    onClick={startCamera}
+                                    style={{
+                                        background: 'hsl(var(--accent-primary))',
+                                        color: '#fff',
+                                        border: 'none',
+                                        borderRadius: 'var(--radius-sm)',
+                                        padding: '0.5rem 1.2rem',
+                                        fontWeight: 700,
+                                        cursor: 'pointer',
+                                        fontSize: '0.9rem',
+                                    }}
+                                >
+                                    ↺ Retry Camera
+                                </button>
+                            </div>
+                        </div>
                     )}
 
                     {/* Scanning overlay */}
