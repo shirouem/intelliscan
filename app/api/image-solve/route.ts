@@ -23,8 +23,10 @@ type BrowserSolveResponse = {
     provider?: string;
 };
 
-function normalizeProviderName(providerName: unknown): "chatgpt" | "gemini" {
-    return providerName === "gemini" ? "gemini" : "chatgpt";
+function normalizeProviderName(providerName: unknown): "deepseek" | "gemini" {
+    if (providerName === "gemini") return "gemini";
+    // map legacy "chatgpt" references to deepseek
+    return "deepseek";
 }
 
 function getErrorMessage(error: unknown, fallback = "Unknown error") {

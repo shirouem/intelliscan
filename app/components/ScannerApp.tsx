@@ -12,7 +12,7 @@ interface ScannedQuestion {
     isSolving?: boolean;
 }
 
-type ImageSolveProvider = "chatgpt" | "gemini";
+type ImageSolveProvider = "deepseek" | "gemini";
 
 type ImageSolveStatusData = {
     jobId?: string;
@@ -66,7 +66,7 @@ type CaptureFrameOptions = {
 
 // ─── Provider Catalog ─────────────────────────────────────────────────────────
 const ALL_SOLVE_PROVIDERS: { id: string; label: string }[] = [
-    { id: "chatgpt", label: "ChatGPT" },
+    { id: "deepseek", label: "DeepSeek" },
     { id: "gemini", label: "Gemini" },
 ];
 
@@ -113,14 +113,14 @@ const formatBytes = (bytes: number) => {
 };
 
 const getProviderLabel = (provider: string | null | undefined) => {
-    if (provider === "chatgpt") return "ChatGPT";
+    if (provider === "deepseek") return "DeepSeek";
     if (provider === "gemini") return "Gemini";
     if (provider === "gemini-api") return "Gemini API";
     return "Image Solve";
 };
 
 const normalizeImageSolveProvider = (provider: string | null | undefined): ImageSolveProvider | null =>
-    provider === "chatgpt" || provider === "gemini" ? provider : null;
+    provider === "deepseek" || provider === "gemini" ? provider : null;
 
 const readImageSolveResponse = async (response: Response): Promise<ImageSolveStatusData> => {
     const contentType = response.headers.get("content-type") || "";
@@ -197,8 +197,8 @@ export default function ScannerApp() {
     const [uploadedImageBase64, setUploadedImageBase64] = useState<string | null>(null);
 
     // ── Provider setup: ordered checklist ─────────────────────────────────────
-    const [imageSolveProviderOrder, setImageSolveProviderOrder] = useState<string[]>(["chatgpt", "gemini"]);
-    const [imageSolveProviderEnabled, setImageSolveProviderEnabled] = useState<Record<string, boolean>>({ chatgpt: true, gemini: true });
+    const [imageSolveProviderOrder, setImageSolveProviderOrder] = useState<string[]>(["deepseek", "gemini"]);
+    const [imageSolveProviderEnabled, setImageSolveProviderEnabled] = useState<Record<string, boolean>>({ deepseek: true, gemini: true });
     const [providerDragOver, setProviderDragOver] = useState<number | null>(null);
 
     // ── Retry ─────────────────────────────────────────────────────────────────
@@ -594,7 +594,7 @@ export default function ScannerApp() {
 
         // Derive providers from the ordered+enabled list
         const enabledProviders = imageSolveProviderOrder.filter(p => imageSolveProviderEnabled[p]);
-        const requestPrimaryProvider = (enabledProviders[0] ?? "chatgpt") as ImageSolveProvider;
+        const requestPrimaryProvider = (enabledProviders[0] ?? "deepseek") as ImageSolveProvider;
         const requestBackupProvider = (enabledProviders[1] ?? null) as ImageSolveProvider | null;
         setImageSolveBackupProvider(requestBackupProvider);
 
@@ -781,7 +781,7 @@ export default function ScannerApp() {
 
         // Derive providers from the ordered+enabled list
         const enabledProviders = imageSolveProviderOrder.filter(p => imageSolveProviderEnabled[p]);
-        const requestPrimaryProvider = (enabledProviders[0] ?? "chatgpt") as ImageSolveProvider;
+        const requestPrimaryProvider = (enabledProviders[0] ?? "deepseek") as ImageSolveProvider;
         const requestBackupProvider = (enabledProviders[1] ?? null) as ImageSolveProvider | null;
         setImageSolveBackupProvider(requestBackupProvider);
 
@@ -1129,7 +1129,7 @@ export default function ScannerApp() {
     const activeBackupProvider = enabledProviders[1] ?? null;
 
     const imageSolveProviderLabel =
-        imageSolveAnswerProvider === "chatgpt" ? "ChatGPT Browser" :
+        imageSolveAnswerProvider === "deepseek" ? "DeepSeek Browser" :
             imageSolveAnswerProvider === "gemini" ? "Gemini Browser" :
                 imageSolveAnswerProvider === "gemini-api" ? "Gemini API" :
                     "Image Solve";
