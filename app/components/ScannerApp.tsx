@@ -906,6 +906,20 @@ export default function ScannerApp() {
         setTimeout(() => solveWithUploadedImage(item.image, item.prompt), 0);
     }, [clearImageSolveResult, solveWithUploadedImage]);
 
+    const handleDeleteItem = useCallback(async (jobId: string) => {
+        if (!window.confirm("Are you sure you want to permanently delete this record?")) return;
+        try {
+            const res = await fetch(`/api/image-solve/${jobId}`, { method: 'DELETE' });
+            if (res.ok) {
+                setImageSolveResults(prev => prev.filter(item => item.id !== jobId));
+            } else {
+                alert("Failed to delete record.");
+            }
+        } catch (err) {
+            alert("Error deleting record.");
+        }
+    }, []);
+
     // ── File upload ───────────────────────────────────────────────────────────
     const handleFileUpload = useCallback((file: File) => {
         if (!file.type.startsWith("image/")) return;
@@ -1604,15 +1618,36 @@ export default function ScannerApp() {
                                         {item.backupAnswer && <div className="polling-result-answer">{item.backupAnswer}</div>}
                                         {item.backupError && <div className="polling-result-error">{item.backupError}</div>}
                                         {item.image && item.status !== "solving" && item.status !== "capturing" && (
-                                            <button
-                                                className="retry-btn"
-                                                style={{ marginTop: '0.5rem' }}
-                                                onClick={() => handleRetryItem(item)}
-                                                disabled={imageSolveBusy}
-                                                title="Retry this solve"
-                                            >
-                                                ↺ Retry
-                                            </button>
+                                            <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                                                <button
+                                                    className="retry-btn"
+                                                    onClick={() => handleRetryItem(item)}
+                                                    disabled={imageSolveBusy}
+                                                    title="Retry this solve"
+                                                    style={{ flex: 1 }}
+                                                >
+                                                    ↺ Retry
+                                                </button>
+                                                <button
+                                                    className="delete-btn"
+                                                    onClick={() => handleDeleteItem(item.id)}
+                                                    disabled={imageSolveBusy}
+                                                    title="Delete this record"
+                                                    style={{ 
+                                                        flex: 1, 
+                                                        background: 'rgba(255, 59, 48, 0.1)', 
+                                                        color: '#ff3b30',
+                                                        border: '1px solid rgba(255, 59, 48, 0.3)',
+                                                        borderRadius: '8px',
+                                                        padding: '0.5rem',
+                                                        fontSize: '0.9rem',
+                                                        fontWeight: 600,
+                                                        cursor: 'pointer'
+                                                    }}
+                                                >
+                                                    🗑️ Delete
+                                                </button>
+                                            </div>
                                         )}
                                     </div>
                                 </div>
