@@ -159,6 +159,7 @@ export default function ScannerApp() {
     const [isProcessingSolutions, setIsProcessingSolutions] = useState(false);
     const [expandedSolutionIds, setExpandedSolutionIds] = useState<Set<string>>(new Set());
     const [activeTab, setActiveTab] = useState<"all" | "unsolved" | "solved">("all");
+    const [bottomTab, setBottomTab] = useState<"questions" | "imagesolve">("questions");
 
     // ── Settings ──────────────────────────────────────────────────────────────
     const defaultSolvePrompt =
@@ -282,9 +283,11 @@ export default function ScannerApp() {
                             ...job,
                             id: job.jobId,
                             image: imageUrl,
+                            screenshot: job.primaryScreenshot || null,
+                            backupScreenshot: job.backupScreenshot || null,
                             source: "browser",
                             primaryProvider: job.provider,
-                            answerProvider: job.primaryAnswer ? job.provider : job.backupProvider,
+                            answerProvider: job.primaryScreenshot ? job.provider : (job.backupScreenshot ? job.backupProvider : null),
                             status: job.status,
                             createdAt: job.createdAt || new Date().toISOString(),
                         };
@@ -1199,6 +1202,7 @@ export default function ScannerApp() {
                                 if (imageSolveMode) return;
                                 setImageSolveMode(true);
                                 clearImageSolveResult();
+                                setBottomTab("imagesolve");
                             }}
                         >
                             🧠 Image Solve
@@ -1481,76 +1485,6 @@ export default function ScannerApp() {
                                 </div>
                             )}
 
-                            {/* Image Solve History Stack */}
-                            <div className="polling-results-panel image-solve-history-panel">
-                                <div className="polling-results-header">
-                                    <span>Global Image Solve Stack ({imageSolveResults.length})</span>
-                                </div>
-                                {!isImageSolveResultsLoaded && (
-                                    <div className="polling-results-empty">Loading saved image solves...</div>
-                                )}
-                                {isImageSolveResultsLoaded && imageSolveResults.length === 0 && (
-                                    <div className="polling-results-empty">No image solves yet.</div>
-                                )}
-                                {imageSolveResults.map((item) => {
-                                    const itemProviderLabel = getProviderLabel(item.answerProvider || item.primaryProvider);
-                                    return (
-                                        <div className={`polling-result-card ${item.status}`} key={item.id}>
-                                            <button
-                                                className="polling-result-image"
-                                                onClick={() => item.image && setExpandedSolverScreenshot({ src: item.image, label: "Image Solve Request" })}
-                                                disabled={!item.image}
-                                            >
-                                                {item.image ? <img src={item.image} alt="Image solve request" /> : <span>No image</span>}
-                                            </button>
-                                            <div className="polling-result-content">
-                                                <div className="polling-result-meta">
-                                                    <span>{new Date(item.createdAt).toLocaleTimeString()}</span>
-                                                    <span>{item.source}</span>
-                                                    <span>{item.status}</span>
-                                                    <span>{itemProviderLabel}</span>
-                                                </div>
-                                                {item.error && <div className="polling-result-error">{item.error}</div>}
-                                                {item.browserError && <div className="polling-result-warning">{item.browserError}</div>}
-                                                {item.answer && <div className="polling-result-answer">{item.answer}</div>}
-                                                {item.screenshot && (
-                                                    <button
-                                                        className="polling-result-link"
-                                                        onClick={() => setExpandedSolverScreenshot({ src: item.screenshot!, label: `${itemProviderLabel} Screenshot` })}
-                                                    >
-                                                        Open primary screenshot
-                                                    </button>
-                                                )}
-                                                {(item.backupStatus === "queued" || item.backupStatus === "solving") && (
-                                                    <div className="polling-result-warning">{getProviderLabel(item.backupProvider)} backup running...</div>
-                                                )}
-                                                {item.backupScreenshot && (
-                                                    <button
-                                                        className="polling-result-link"
-                                                        onClick={() => setExpandedSolverScreenshot({ src: item.backupScreenshot!, label: `${getProviderLabel(item.backupProvider)} Backup Screenshot` })}
-                                                    >
-                                                        Open backup screenshot
-                                                    </button>
-                                                )}
-                                                {item.backupAnswer && <div className="polling-result-answer">{item.backupAnswer}</div>}
-                                                {item.backupError && <div className="polling-result-error">{item.backupError}</div>}
-                                                {/* Retry button for each history item */}
-                                                {item.image && item.status !== "solving" && (
-                                                    <button
-                                                        className="retry-btn"
-                                                        style={{ marginTop: '0.5rem' }}
-                                                        onClick={() => handleRetryItem(item)}
-                                                        disabled={imageSolveBusy}
-                                                        title="Retry this solve"
-                                                    >
-                                                        ↺ Retry
-                                                    </button>
-                                                )}
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                            </div>
                         </>
                     )}
 
@@ -1611,8 +1545,21 @@ export default function ScannerApp() {
             {/* Right side: Results */}
             <div className="results-section">
                 <div className="results-header">
-                    <h2>Extracted Questions ({savedQuestions.length})</h2>
-                    <div style={{ display: "flex", gap: "0.5rem" }}>
+                    <div className="bottom-tab-bar">
+                        <button
+                            className={`tab-btn ${bottomTab === "questions" ? "active" : ""}`}
+                            onClick={() => setBottomTab("questions")}
+                        >
+                            Questions ({savedQuestions.length})
+                        </button>
+                        <button
+                            className={`tab-btn ${bottomTab === "imagesolve" ? "active" : ""}`}
+                            onClick={() => { setBottomTab("imagesolve"); fetchHistory(); }}
+                        >
+                            Image Solve Stack ({imageSolveResults.length})
+                        </button>
+                    </div>
+                    {bottomTab === "questions" && <div style={{ display: "flex", gap: "0.5rem" }}>
                         {selectedQuestionIds.size > 0 && (
                             <button
                                 className="process-btn"
@@ -1628,10 +1575,68 @@ export default function ScannerApp() {
                         {savedQuestions.length > 0 && (
                             <button className="reset-btn danger" onClick={clearAllQuestions}>Clear All</button>
                         )}
-                    </div>
+                    </div>}
                 </div>
 
-                {savedQuestions.length > 0 && (
+                {bottomTab === "imagesolve" && (
+                    <div className="polling-results-panel image-solve-history-panel" style={{ margin: 0, border: 'none', boxShadow: 'none' }}>
+                        {!isImageSolveResultsLoaded && (
+                            <div className="polling-results-empty">Loading...</div>
+                        )}
+                        {isImageSolveResultsLoaded && imageSolveResults.length === 0 && (
+                            <div className="polling-results-empty">No image solves yet.</div>
+                        )}
+                        {imageSolveResults.map((item) => {
+                            const itemProviderLabel = getProviderLabel(item.answerProvider || item.primaryProvider);
+                            const displayScreenshot = item.screenshot || item.backupScreenshot || null;
+                            const screenshotLabel = item.screenshot
+                                ? `${getProviderLabel(item.primaryProvider)} Screenshot`
+                                : item.backupScreenshot ? `${getProviderLabel(item.backupProvider)} Backup Screenshot` : "";
+                            return (
+                                <div className={`polling-result-card ${item.status}`} key={item.id}>
+                                    <button
+                                        className="polling-result-image"
+                                        onClick={() => displayScreenshot && setExpandedSolverScreenshot({ src: displayScreenshot, label: screenshotLabel })}
+                                        disabled={!displayScreenshot}
+                                        title={displayScreenshot ? "View screenshot" : "No screenshot yet"}
+                                    >
+                                        {displayScreenshot
+                                            ? <img src={displayScreenshot} alt="AI response screenshot" />
+                                            : <span style={{ fontSize: '0.7rem', opacity: 0.5 }}>{item.status === 'solving' || item.status === 'capturing' ? '⏳' : 'No screenshot'}</span>
+                                        }
+                                    </button>
+                                    <div className="polling-result-content">
+                                        <div className="polling-result-meta">
+                                            <span>{new Date(item.createdAt).toLocaleTimeString()}</span>
+                                            <span>{item.status}</span>
+                                            <span>{itemProviderLabel}</span>
+                                        </div>
+                                        {item.answer && <div className="polling-result-answer">{item.answer}</div>}
+                                        {item.error && !item.screenshot && <div className="polling-result-error">{item.error}</div>}
+                                        {(item.backupStatus === "queued" || item.backupStatus === "solving") && (
+                                            <div className="polling-result-warning">{getProviderLabel(item.backupProvider)} backup running...</div>
+                                        )}
+                                        {item.backupAnswer && <div className="polling-result-answer">{item.backupAnswer}</div>}
+                                        {item.backupError && <div className="polling-result-error">{item.backupError}</div>}
+                                        {item.image && item.status !== "solving" && item.status !== "capturing" && (
+                                            <button
+                                                className="retry-btn"
+                                                style={{ marginTop: '0.5rem' }}
+                                                onClick={() => handleRetryItem(item)}
+                                                disabled={imageSolveBusy}
+                                                title="Retry this solve"
+                                            >
+                                                ↺ Retry
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+
+                {bottomTab === "questions" && savedQuestions.length > 0 && (
                     <div className="tabs-container">
                         <button
                             className={`tab-btn ${activeTab === "all" ? "active" : ""}`}
@@ -1654,7 +1659,7 @@ export default function ScannerApp() {
                     </div>
                 )}
 
-                <div className="results-content">
+                {bottomTab === "questions" && <div className="results-content">
                     {scanStatus === "idle" && savedQuestions.length === 0 && (
                         <div className="empty-state">
                             <div className="empty-icon">📄</div>
@@ -1762,7 +1767,7 @@ export default function ScannerApp() {
                             ))}
                         </div>
                     )}
-                </div>
+                </div>}
             </div>
         </div>
     );
