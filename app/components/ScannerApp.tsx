@@ -1440,10 +1440,25 @@ export default function ScannerApp() {
                                                     ↺ Retry
                                                 </button>
                                             )}
-                                            <button
-                                                className="delete-btn"
-                                                onClick={clearImageSolveResult}
-                                            >✕</button>
+                                            {imageSolveJobId && (
+                                                <button
+                                                    className="delete-btn"
+                                                    onClick={() => {
+                                                        handleDeleteItem(imageSolveJobId);
+                                                        clearImageSolveResult();
+                                                    }}
+                                                    title="Permanently delete this record"
+                                                    style={{ background: 'rgba(255,59,48,0.1)', color: '#ff3b30', border: '1px solid rgba(255,59,48,0.3)', borderRadius: '4px', padding: '0.2rem 0.5rem', cursor: 'pointer' }}
+                                                >
+                                                    🗑️ Delete
+                                                </button>
+                                            )}
+                                            {!imageSolveJobId && (
+                                                <button
+                                                    className="delete-btn"
+                                                    onClick={clearImageSolveResult}
+                                                >✕</button>
+                                            )}
                                         </div>
                                     </div>
                                     {imageSolveAnswer && (
