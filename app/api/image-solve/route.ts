@@ -3,7 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 type ImageSolveBody = {
     image?: string;
     prompt?: string;
-    primaryProvider?: "chatgpt" | "gemini";
+    primaryProvider?: string;
+    backupProvider?: string | null;
 };
 
 type BrowserSolveResponse = {
@@ -39,6 +40,7 @@ export async function POST(req: NextRequest) {
         const body = await req.json() as ImageSolveBody;
         const { image, prompt } = body;
         const primaryProvider = normalizeProviderName(body.primaryProvider);
+        const backupProvider = body.backupProvider === undefined ? null : body.backupProvider;
 
         if (!image) {
             return NextResponse.json({ error: "No image provided." }, { status: 400 });
@@ -55,7 +57,7 @@ export async function POST(req: NextRequest) {
             const browserRes = await fetch(`${browserServiceUrl}/image-solve`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ image, prompt: solvePrompt, primaryProvider }),
+                body: JSON.stringify({ image, prompt: solvePrompt, primaryProvider, backupProvider }),
                 signal: AbortSignal.timeout(295_000),
             });
 
@@ -73,7 +75,7 @@ export async function POST(req: NextRequest) {
                         backupAnswer: data.backupAnswer || null,
                         backupScreenshot: data.backupScreenshot || null,
                         backupStatus: data.backupStatus || (data.jobId ? "queued" : null),
-                        backupProvider: data.backupProvider || (primaryProvider === "gemini" ? "chatgpt" : "gemini"),
+                        backupProvider: data.backupProvider || backupProvider,
                         provider: data.provider || primaryProvider,
                         primaryError: data.primaryError || data.browserError || data.error || null,
                         browserError: data.browserError || data.primaryError || data.error || null,

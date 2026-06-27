@@ -638,6 +638,7 @@ export default function ScannerApp() {
                     image: base64Image,
                     prompt: customSolvePrompt,
                     primaryProvider: requestPrimaryProvider,
+                    backupProvider: requestBackupProvider,
                 }),
             });
 
@@ -789,6 +790,7 @@ export default function ScannerApp() {
                     image: base64Image,
                     prompt: solvePrompt,
                     primaryProvider: requestPrimaryProvider,
+                    backupProvider: requestBackupProvider,
                 }),
             });
 
