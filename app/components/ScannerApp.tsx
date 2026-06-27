@@ -3,13 +3,13 @@
 import React, { useRef, useState, useCallback, useEffect } from "react";
 import "./ScannerApp.css";
 
-// Interface for API response
+// ─── Types ────────────────────────────────────────────────────────────────────
 interface ScannedQuestion {
     id: string;
     questionNumber: string;
     text: string;
     solution?: string;
-    isSolving?: boolean; // UI state for loading indicator
+    isSolving?: boolean;
 }
 
 type ImageSolveProvider = "chatgpt" | "gemini";
@@ -33,71 +33,24 @@ type ImageSolveStatusData = {
     fallbackRequired?: boolean;
 };
 
-type PollingSolveItem = {
+type StoredImageSolveItem = {
     id: string;
     createdAt: string;
     image: string;
     status: "capturing" | "solving" | "done" | "error";
-    primaryProvider: ImageSolveProvider;
+    primaryProvider: string;
+    source: "camera" | "upload";
+    prompt?: string;
     answer?: string | null;
     screenshot?: string | null;
     answerProvider?: string | null;
     backupAnswer?: string | null;
     backupScreenshot?: string | null;
     backupStatus?: "idle" | "queued" | "solving" | "done" | "error";
-    backupProvider?: ImageSolveProvider | string | null;
+    backupProvider?: string | null;
     backupError?: string | null;
     browserError?: string | null;
     error?: string | null;
-};
-
-type StoredImageSolveItem = PollingSolveItem & {
-    source: "camera" | "upload";
-};
-
-type SheetDetectionMetrics = {
-    detected: boolean;
-    baselineReady: boolean;
-    score: number;
-    modelStatus: DocumentDetectorStatus;
-    modelLabel: string | null;
-    modelConfidence: number;
-    modelMeanConfidence: number;
-    modelGateProgress: number;
-    averageBrightness: number;
-    darkPixelRatio: number;
-    edgeDensity: number;
-    centerDarkRatio: number;
-    lightPixelRatio: number;
-    changeRatio: number;
-    centerChangeRatio: number;
-    mode: "none" | "frame-filled" | "region" | "model";
-};
-
-type SheetFrameAnalysis = {
-    metrics: SheetDetectionMetrics;
-    gray: Uint8Array;
-};
-
-type DocumentDetectorStatus = "idle" | "loading" | "ready" | "missing" | "error";
-
-type DocumentDetector = {
-    ort: typeof import("onnxruntime-web");
-    session: import("onnxruntime-web").InferenceSession;
-    inputName: string;
-    outputName: string;
-    labels: string[];
-    inputSize: number;
-};
-
-type YoloDetection = {
-    label: string | null;
-    score: number;
-    classId: number;
-    x: number;
-    y: number;
-    width: number;
-    height: number;
 };
 
 type CaptureFrameOptions = {
@@ -110,6 +63,13 @@ type CaptureFrameOptions = {
     mirrorHorizontal?: boolean;
 };
 
+// ─── Provider Catalog ─────────────────────────────────────────────────────────
+const ALL_SOLVE_PROVIDERS: { id: string; label: string }[] = [
+    { id: "chatgpt", label: "ChatGPT" },
+    { id: "gemini", label: "Gemini" },
+];
+
+// ─── Capture options ──────────────────────────────────────────────────────────
 const scanCaptureOptions: CaptureFrameOptions = {
     mimeType: "image/jpeg",
     quality: 0.92,
@@ -129,6 +89,7 @@ const imageSolveCaptureOptions: CaptureFrameOptions = {
     mirrorHorizontal: true,
 };
 
+// ─── Utility helpers ──────────────────────────────────────────────────────────
 const getErrorMessage = (error: unknown, fallback = "Image solve failed.") => {
     if (error instanceof Error) return error.message;
     if (typeof error === "string") return error;
@@ -160,9 +121,6 @@ const getProviderLabel = (provider: string | null | undefined) => {
 const normalizeImageSolveProvider = (provider: string | null | undefined): ImageSolveProvider | null =>
     provider === "chatgpt" || provider === "gemini" ? provider : null;
 
-const getBackupProvider = (provider: ImageSolveProvider): ImageSolveProvider =>
-    provider === "gemini" ? "chatgpt" : "gemini";
-
 const readImageSolveResponse = async (response: Response): Promise<ImageSolveStatusData> => {
     const contentType = response.headers.get("content-type") || "";
     const text = await response.text();
@@ -180,76 +138,9 @@ const readImageSolveResponse = async (response: Response): Promise<ImageSolveSta
     }
 };
 
-const pollingDbName = "intelliscan_polling_solve";
-const pollingStoreName = "results";
+// ─── IndexedDB ────────────────────────────────────────────────────────────────
 const imageSolveDbName = "intelliscan_image_solve";
 const imageSolveStoreName = "results";
-const documentDetectorModelPath = "/models/document-detector.onnx";
-const documentDetectorLabelsPath = "/models/document-detector.labels.json";
-const documentDetectorInputSize = 640;
-const documentDetectorConfidenceThreshold = 0.5;
-const documentDetectorConfidenceGateMs = 2000;
-const documentDetectorWasmPath = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/";
-const documentLabelPattern = /document|paper|sheet|page|invoice|receipt|form/i;
-
-const openPollingDb = () => new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(pollingDbName, 1);
-    request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains(pollingStoreName)) {
-            db.createObjectStore(pollingStoreName, { keyPath: "id" });
-        }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-});
-
-const loadPollingSolveItems = async () => {
-    const db = await openPollingDb();
-    return new Promise<PollingSolveItem[]>((resolve, reject) => {
-        const tx = db.transaction(pollingStoreName, "readonly");
-        const request = tx.objectStore(pollingStoreName).getAll();
-        request.onsuccess = () => {
-            const items = (request.result as PollingSolveItem[])
-                .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-            resolve(items);
-        };
-        request.onerror = () => reject(request.error);
-        tx.oncomplete = () => db.close();
-    });
-};
-
-const savePollingSolveItem = async (item: PollingSolveItem) => {
-    const db = await openPollingDb();
-    return new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(pollingStoreName, "readwrite");
-        tx.objectStore(pollingStoreName).put(item);
-        tx.oncomplete = () => {
-            db.close();
-            resolve();
-        };
-        tx.onerror = () => {
-            db.close();
-            reject(tx.error);
-        };
-    });
-};
-
-const clearPollingSolveItems = async () => {
-    const db = await openPollingDb();
-    return new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(pollingStoreName, "readwrite");
-        tx.objectStore(pollingStoreName).clear();
-        tx.oncomplete = () => {
-            db.close();
-            resolve();
-        };
-        tx.onerror = () => {
-            db.close();
-            reject(tx.error);
-        };
-    });
-};
 
 const openImageSolveDb = () => new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(imageSolveDbName, 1);
@@ -283,14 +174,8 @@ const saveImageSolveItem = async (item: StoredImageSolveItem) => {
     return new Promise<void>((resolve, reject) => {
         const tx = db.transaction(imageSolveStoreName, "readwrite");
         tx.objectStore(imageSolveStoreName).put(item);
-        tx.oncomplete = () => {
-            db.close();
-            resolve();
-        };
-        tx.onerror = () => {
-            db.close();
-            reject(tx.error);
-        };
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => { db.close(); reject(tx.error); };
     });
 };
 
@@ -299,399 +184,23 @@ const clearImageSolveItems = async () => {
     return new Promise<void>((resolve, reject) => {
         const tx = db.transaction(imageSolveStoreName, "readwrite");
         tx.objectStore(imageSolveStoreName).clear();
-        tx.oncomplete = () => {
-            db.close();
-            resolve();
-        };
-        tx.onerror = () => {
-            db.close();
-            reject(tx.error);
-        };
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => { db.close(); reject(tx.error); };
     });
 };
 
-const emptySheetDetection: SheetDetectionMetrics = {
-    detected: false,
-    baselineReady: false,
-    score: 0,
-    modelStatus: "idle",
-    modelLabel: null,
-    modelConfidence: 0,
-    modelMeanConfidence: 0,
-    modelGateProgress: 0,
-    averageBrightness: 0,
-    darkPixelRatio: 0,
-    edgeDensity: 0,
-    centerDarkRatio: 0,
-    lightPixelRatio: 0,
-    changeRatio: 0,
-    centerChangeRatio: 0,
-    mode: "none",
-};
-
-const analyzeSheetFrame = (
-    video: HTMLVideoElement,
-    canvas: HTMLCanvasElement,
-    baseline: Uint8Array | null,
-): SheetFrameAnalysis => {
-    if (!video.videoWidth || !video.videoHeight) {
-        return { metrics: emptySheetDetection, gray: new Uint8Array() };
-    }
-
-    const targetWidth = 320;
-    const targetHeight = Math.max(1, Math.round(targetWidth * (video.videoHeight / video.videoWidth)));
-    canvas.width = targetWidth;
-    canvas.height = targetHeight;
-
-    const ctx = canvas.getContext("2d", { alpha: false });
-    if (!ctx) return { metrics: emptySheetDetection, gray: new Uint8Array() };
-
-    ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
-    const { data } = ctx.getImageData(0, 0, targetWidth, targetHeight);
-    const gray = new Uint8Array(targetWidth * targetHeight);
-    const pixels = targetWidth * targetHeight;
-
-    let brightnessSum = 0;
-    let darkPixels = 0;
-    let lightPixels = 0;
-    let centerDarkPixels = 0;
-    let centerPixels = 0;
-    let edgePixels = 0;
-    let sampledEdges = 0;
-    let changedPixels = 0;
-    let centerChangedPixels = 0;
-
-    const centerLeft = Math.round(targetWidth * 0.18);
-    const centerRight = Math.round(targetWidth * 0.82);
-    const centerTop = Math.round(targetHeight * 0.18);
-    const centerBottom = Math.round(targetHeight * 0.82);
-
-    for (let y = 0; y < targetHeight; y += 1) {
-        for (let x = 0; x < targetWidth; x += 1) {
-            const pixelIndex = y * targetWidth + x;
-            const dataIndex = pixelIndex * 4;
-            const value = Math.round(data[dataIndex] * 0.299 + data[dataIndex + 1] * 0.587 + data[dataIndex + 2] * 0.114);
-            gray[pixelIndex] = value;
-            brightnessSum += value;
-            if (value < 115) darkPixels += 1;
-            if (value > 165) lightPixels += 1;
-
-            if (x >= centerLeft && x <= centerRight && y >= centerTop && y <= centerBottom) {
-                centerPixels += 1;
-                if (value < 125) centerDarkPixels += 1;
-            }
-
-            if (baseline && baseline.length === pixels) {
-                const changed = Math.abs(value - baseline[pixelIndex]) > 34;
-                if (changed) {
-                    changedPixels += 1;
-                    if (x >= centerLeft && x <= centerRight && y >= centerTop && y <= centerBottom) {
-                        centerChangedPixels += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    for (let y = 1; y < targetHeight; y += 2) {
-        for (let x = 1; x < targetWidth; x += 2) {
-            const pixelIndex = y * targetWidth + x;
-            const horizontal = Math.abs(gray[pixelIndex] - gray[pixelIndex - 1]);
-            const vertical = Math.abs(gray[pixelIndex] - gray[pixelIndex - targetWidth]);
-            if (horizontal + vertical > 52) edgePixels += 1;
-            sampledEdges += 1;
-        }
-    }
-
-    const averageBrightness = brightnessSum / pixels;
-    const darkPixelRatio = darkPixels / pixels;
-    const lightPixelRatio = lightPixels / pixels;
-    const centerDarkRatio = centerPixels ? centerDarkPixels / centerPixels : 0;
-    const edgeDensity = sampledEdges ? edgePixels / sampledEdges : 0;
-    const baselineReady = Boolean(baseline && baseline.length === pixels);
-    const changeRatio = baselineReady ? changedPixels / pixels : 0;
-    const centerChangeRatio = baselineReady && centerPixels ? centerChangedPixels / centerPixels : 0;
-
-    const frameFilledDocument =
-        averageBrightness > 118 &&
-        darkPixelRatio > 0.012 &&
-        darkPixelRatio < 0.48 &&
-        centerDarkRatio > 0.008 &&
-        edgeDensity > 0.018;
-
-    const regionDocument =
-        lightPixelRatio > 0.32 &&
-        averageBrightness > 105 &&
-        darkPixelRatio > 0.01 &&
-        centerDarkRatio > 0.006 &&
-        edgeDensity > 0.014;
-
-    const changedFromBaseline =
-        baselineReady &&
-        changeRatio > 0.075 &&
-        centerChangeRatio > 0.045;
-
-    const frameFilledDetected = frameFilledDocument && changedFromBaseline;
-    const regionDetected = regionDocument && changedFromBaseline;
-
-    const score =
-        Math.min(1, averageBrightness / 180) * 0.24 +
-        Math.min(1, darkPixelRatio / 0.08) * 0.28 +
-        Math.min(1, edgeDensity / 0.07) * 0.28 +
-        Math.min(1, lightPixelRatio / 0.65) * 0.2;
-
-    return {
-        metrics: {
-        detected: frameFilledDetected || regionDetected,
-        baselineReady,
-        score,
-        modelStatus: "idle",
-        modelLabel: null,
-        modelConfidence: 0,
-        modelMeanConfidence: 0,
-        modelGateProgress: 0,
-        averageBrightness,
-        darkPixelRatio,
-        edgeDensity,
-        centerDarkRatio,
-        lightPixelRatio,
-        changeRatio,
-        centerChangeRatio,
-        mode: frameFilledDetected ? "frame-filled" : regionDetected ? "region" : "none",
-        },
-        gray,
-    };
-};
-
-const readDocumentDetectorLabels = async () => {
-    try {
-        const response = await fetch(documentDetectorLabelsPath, { cache: "no-store" });
-        if (!response.ok) return ["document"];
-
-        const value: unknown = await response.json();
-        if (Array.isArray(value)) {
-            return value.filter((label): label is string => typeof label === "string" && label.trim().length > 0);
-        }
-
-        if (value && typeof value === "object") {
-            return Object.values(value).filter((label): label is string => typeof label === "string" && label.trim().length > 0);
-        }
-    } catch (error) {
-        console.warn("Failed to load document detector labels", error);
-    }
-
-    return ["document"];
-};
-
-const loadDocumentDetector = async (): Promise<DocumentDetector> => {
-    const [ort, labels, modelResponse] = await Promise.all([
-        import("onnxruntime-web"),
-        readDocumentDetectorLabels(),
-        fetch(documentDetectorModelPath, { cache: "no-store" }),
-    ]);
-
-    if (modelResponse.status === 404) {
-        throw new Error("DOCUMENT_DETECTOR_MODEL_MISSING");
-    }
-
-    if (!modelResponse.ok) {
-        throw new Error(`Document detector model failed to load (${modelResponse.status}).`);
-    }
-
-    ort.env.wasm.wasmPaths = documentDetectorWasmPath;
-    ort.env.wasm.numThreads = 1;
-
-    const modelBuffer = await modelResponse.arrayBuffer();
-    const session = await ort.InferenceSession.create(modelBuffer, {
-        executionProviders: ["wasm"],
-        graphOptimizationLevel: "all",
-    });
-    const inputName = session.inputNames[0];
-    const outputName = session.outputNames[0];
-
-    if (!inputName || !outputName) {
-        throw new Error("Document detector model has no readable input/output names.");
-    }
-
-    return {
-        ort,
-        session,
-        inputName,
-        outputName,
-        labels: labels.length ? labels : ["document"],
-        inputSize: documentDetectorInputSize,
-    };
-};
-
-const getOutputValue = (
-    data: ArrayLike<number>,
-    rowIndex: number,
-    colIndex: number,
-    rowCount: number,
-    colCount: number,
-    transposed: boolean,
-) => Number(data[transposed ? colIndex * rowCount + rowIndex : rowIndex * colCount + colIndex]);
-
-const parseYoloDetections = (
-    output: import("onnxruntime-web").Tensor,
-    labels: string[],
-): YoloDetection[] => {
-    const data = output.data as ArrayLike<number>;
-    const dims = output.dims;
-    let rowCount = 0;
-    let colCount = 0;
-    let transposed = false;
-
-    if (dims.length === 3) {
-        const dimA = dims[1] || 0;
-        const dimB = dims[2] || 0;
-        if (dimA >= 5 && dimB > dimA) {
-            rowCount = dimB;
-            colCount = dimA;
-            transposed = true;
-        } else {
-            rowCount = dimA;
-            colCount = dimB;
-        }
-    } else if (dims.length === 2) {
-        const dimA = dims[0] || 0;
-        const dimB = dims[1] || 0;
-        if (dimA >= 5 && dimB > dimA) {
-            rowCount = dimB;
-            colCount = dimA;
-            transposed = true;
-        } else {
-            rowCount = dimA;
-            colCount = dimB;
-        }
-    }
-
-    if (!rowCount || colCount < 5) return [];
-
-    const detections: YoloDetection[] = [];
-
-    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
-        const x = getOutputValue(data, rowIndex, 0, rowCount, colCount, transposed);
-        const y = getOutputValue(data, rowIndex, 1, rowCount, colCount, transposed);
-        const widthOrX2 = getOutputValue(data, rowIndex, 2, rowCount, colCount, transposed);
-        const heightOrY2 = getOutputValue(data, rowIndex, 3, rowCount, colCount, transposed);
-        let score = 0;
-        let classId = 0;
-        let usesCornerBox = false;
-
-        if (colCount === 5) {
-            score = getOutputValue(data, rowIndex, 4, rowCount, colCount, transposed);
-        } else if (colCount === 6) {
-            const objectnessOrScore = getOutputValue(data, rowIndex, 4, rowCount, colCount, transposed);
-            const classOrClassScore = getOutputValue(data, rowIndex, 5, rowCount, colCount, transposed);
-            if (labels.length <= 1 && classOrClassScore >= 0 && classOrClassScore <= 1) {
-                score = objectnessOrScore * classOrClassScore;
-            } else {
-                score = objectnessOrScore;
-                classId = Math.max(0, Math.round(classOrClassScore));
-                usesCornerBox = true;
-            }
-        } else {
-            const classStart = labels.length > 0 && colCount === labels.length + 4 ? 4 : 5;
-            const objectness = classStart === 5
-                ? getOutputValue(data, rowIndex, 4, rowCount, colCount, transposed)
-                : 1;
-
-            let bestClassScore = 0;
-            for (let colIndex = classStart; colIndex < colCount; colIndex += 1) {
-                const classScore = getOutputValue(data, rowIndex, colIndex, rowCount, colCount, transposed);
-                if (classScore > bestClassScore) {
-                    bestClassScore = classScore;
-                    classId = colIndex - classStart;
-                }
-            }
-
-            score = objectness * bestClassScore;
-        }
-
-        const label = labels[classId] || null;
-        const documentLike = !label || labels.length <= 1 || documentLabelPattern.test(label);
-        if (!documentLike || !Number.isFinite(score) || score <= 0) continue;
-
-        detections.push({
-            label,
-            score,
-            classId,
-            x: usesCornerBox ? x : x - widthOrX2 / 2,
-            y: usesCornerBox ? y : y - heightOrY2 / 2,
-            width: usesCornerBox ? widthOrX2 - x : widthOrX2,
-            height: usesCornerBox ? heightOrY2 - y : heightOrY2,
-        });
-    }
-
-    return detections.sort((a, b) => b.score - a.score);
-};
-
-const detectSheetWithDocumentModel = async (
-    video: HTMLVideoElement,
-    canvas: HTMLCanvasElement,
-    detector: DocumentDetector,
-): Promise<SheetDetectionMetrics> => {
-    const size = detector.inputSize;
-    const videoWidth = video.videoWidth;
-    const videoHeight = video.videoHeight;
-    if (!videoWidth || !videoHeight) return { ...emptySheetDetection, modelStatus: "ready", baselineReady: true };
-
-    canvas.width = size;
-    canvas.height = size;
-    const ctx = canvas.getContext("2d", { alpha: false });
-    if (!ctx) return { ...emptySheetDetection, modelStatus: "error", baselineReady: true };
-
-    const scale = Math.min(size / videoWidth, size / videoHeight);
-    const drawWidth = Math.round(videoWidth * scale);
-    const drawHeight = Math.round(videoHeight * scale);
-    const offsetX = Math.floor((size - drawWidth) / 2);
-    const offsetY = Math.floor((size - drawHeight) / 2);
-
-    ctx.fillStyle = "#727272";
-    ctx.fillRect(0, 0, size, size);
-    ctx.drawImage(video, offsetX, offsetY, drawWidth, drawHeight);
-
-    const imageData = ctx.getImageData(0, 0, size, size);
-    const pixelCount = size * size;
-    const input = new Float32Array(3 * pixelCount);
-    let brightnessSum = 0;
-
-    for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
-        const sourceIndex = pixelIndex * 4;
-        const r = imageData.data[sourceIndex];
-        const g = imageData.data[sourceIndex + 1];
-        const b = imageData.data[sourceIndex + 2];
-        input[pixelIndex] = r / 255;
-        input[pixelCount + pixelIndex] = g / 255;
-        input[pixelCount * 2 + pixelIndex] = b / 255;
-        brightnessSum += (r + g + b) / 3;
-    }
-
-    const tensor = new detector.ort.Tensor("float32", input, [1, 3, size, size]);
-    const results = await detector.session.run({ [detector.inputName]: tensor });
-    const output = results[detector.outputName] || Object.values(results)[0];
-    const bestDetection = output ? parseYoloDetections(output, detector.labels)[0] : null;
-    const confidence = bestDetection?.score || 0;
-
-    return {
-        ...emptySheetDetection,
-        detected: confidence >= documentDetectorConfidenceThreshold,
-        baselineReady: true,
-        score: confidence,
-        modelStatus: "ready",
-        modelLabel: bestDetection?.label || null,
-        modelConfidence: confidence,
-        averageBrightness: brightnessSum / pixelCount,
-        mode: confidence >= documentDetectorConfidenceThreshold ? "model" : "none",
-    };
-};
-
+// ─── Component ───────────────────────────────────────────────────────────────
 export default function ScannerApp() {
+    // ── Refs ──────────────────────────────────────────────────────────────────
     const videoRef = useRef<HTMLVideoElement | null>(null);
     const streamRef = useRef<MediaStream | null>(null);
-    const pollingDetectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
-    const fileInputRef = useRef<HTMLInputElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null!);
+    const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const imageSolveRunIdRef = useRef(0);
+    const cameraRunIdRef = useRef(0);
+    const providerDragIndexRef = useRef<number | null>(null);
+
+    // ── Scan mode ─────────────────────────────────────────────────────────────
     const [isCapturing, setIsCapturing] = useState(false);
     const [savedQuestions, setSavedQuestions] = useState<ScannedQuestion[]>([]);
     const [selectedQuestionIds, setSelectedQuestionIds] = useState<Set<string>>(new Set());
@@ -699,25 +208,15 @@ export default function ScannerApp() {
     const [expandedSolutionIds, setExpandedSolutionIds] = useState<Set<string>>(new Set());
     const [activeTab, setActiveTab] = useState<"all" | "unsolved" | "solved">("all");
 
-    // Settings state
-    const defaultSolvePrompt = "You are an expert tutor. I am providing you with an array of questions extracted from a question paper.\nPlease solve each question accurately and provide a clear, step-by-step solution.";
+    // ── Settings ──────────────────────────────────────────────────────────────
+    const defaultSolvePrompt =
+        "You are an expert tutor. I am providing you with an array of questions extracted from a question paper.\nPlease solve each question accurately and provide a clear, step-by-step solution.";
     const [customSolvePrompt, setCustomSolvePrompt] = useState(defaultSolvePrompt);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-    // Edit mode state
+    // ── Edit mode ─────────────────────────────────────────────────────────────
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editingText, setEditingText] = useState("");
-    const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
-    const imageSolveRunIdRef = useRef(0);
-    const cameraRunIdRef = useRef(0);
-    const pollingSolveActiveRef = useRef(false);
-    const pollingCooldownUntilRef = useRef(0);
-    const pollingBaselineRef = useRef<Uint8Array | null>(null);
-    const pollingDetectionPausedRef = useRef(false);
-    const pollingConfidenceSamplesRef = useRef<Array<{ time: number; confidence: number }>>([]);
-    const pollingConfidenceWindowStartRef = useRef<number | null>(null);
-    const documentDetectorRef = useRef<DocumentDetector | null>(null);
-    const documentDetectorLoadIdRef = useRef(0);
 
     const [scanStatus, setScanStatus] = useState<"idle" | "scanning" | "success" | "error">("idle");
     const [errorMessage, setErrorMessage] = useState("");
@@ -736,32 +235,32 @@ export default function ScannerApp() {
     const [imageSolveError, setImageSolveError] = useState<string | null>(null);
     const [imageSolveBrowserError, setImageSolveBrowserError] = useState<string | null>(null);
     const [imageSolveAnswerProvider, setImageSolveAnswerProvider] = useState<string | null>(null);
-    const [imageSolvePrimaryProvider, setImageSolvePrimaryProvider] = useState<ImageSolveProvider>("chatgpt");
-    const [imageSolveBackupProvider, setImageSolveBackupProvider] = useState<ImageSolveProvider | null>(null);
+    const [imageSolveBackupProvider, setImageSolveBackupProvider] = useState<string | null>(null);
     const [imageSolveCountdown, setImageSolveCountdown] = useState<number | null>(null);
     const [expandedSolverScreenshot, setExpandedSolverScreenshot] = useState<{ src: string; label: string } | null>(null);
     const [imageSolveUploadMode, setImageSolveUploadMode] = useState(false);
     const [uploadedImagePreview, setUploadedImagePreview] = useState<string | null>(null);
     const [uploadedImageBase64, setUploadedImageBase64] = useState<string | null>(null);
-    const [pollingSolveMode, setPollingSolveMode] = useState(false);
-    const [pollingSolveEnabled, setPollingSolveEnabled] = useState(false);
-    const [pollingSolveCountdown, setPollingSolveCountdown] = useState<number | null>(null);
-    const [pollingSolveDelay, setPollingSolveDelay] = useState(6);
-    const [pollingDetection, setPollingDetection] = useState<SheetDetectionMetrics>(emptySheetDetection);
-    const [documentDetectorStatus, setDocumentDetectorStatus] = useState<DocumentDetectorStatus>("idle");
-    const [documentDetectorError, setDocumentDetectorError] = useState<string | null>(null);
-    const [documentDetectorReloadKey, setDocumentDetectorReloadKey] = useState(0);
-    const [pollingSolveResults, setPollingSolveResults] = useState<PollingSolveItem[]>([]);
-    const [imageSolveResults, setImageSolveResults] = useState<StoredImageSolveItem[]>([]);
-    const [isPollingResultsLoaded, setIsPollingResultsLoaded] = useState(false);
-    const [isImageSolveResultsLoaded, setIsImageSolveResultsLoaded] = useState(false);
-    const [isPollingSolveActive, setIsPollingSolveActive] = useState(false);
 
-    // Mounted state to avoid hydration errors around browser-only camera APIs.
+    // ── Provider setup: ordered checklist ─────────────────────────────────────
+    const [imageSolveProviderOrder, setImageSolveProviderOrder] = useState<string[]>(["chatgpt", "gemini"]);
+    const [imageSolveProviderEnabled, setImageSolveProviderEnabled] = useState<Record<string, boolean>>({ chatgpt: true, gemini: true });
+    const [providerDragOver, setProviderDragOver] = useState<number | null>(null);
+
+    // ── Retry ─────────────────────────────────────────────────────────────────
+    const [lastSolvedImageBase64, setLastSolvedImageBase64] = useState<string | null>(null);
+    const [lastSolvedPrompt, setLastSolvedPrompt] = useState<string | null>(null);
+
+    // ── Image solve results stack ─────────────────────────────────────────────
+    const [imageSolveResults, setImageSolveResults] = useState<StoredImageSolveItem[]>([]);
+    const [isImageSolveResultsLoaded, setIsImageSolveResultsLoaded] = useState(false);
+
+    // ── Mount state ───────────────────────────────────────────────────────────
     const [mounted, setMounted] = useState(false);
     const [isLoaded, setIsLoaded] = useState(false);
     const [cameraError, setCameraError] = useState<string | null>(null);
 
+    // ── Initial load ──────────────────────────────────────────────────────────
     useEffect(() => {
         const stored = localStorage.getItem("scannerApp_savedQuestions");
         if (stored) {
@@ -783,40 +282,41 @@ export default function ScannerApp() {
         }
 
         const storedPrompt = localStorage.getItem("scannerApp_solvePrompt");
-        if (storedPrompt) {
-            setCustomSolvePrompt(storedPrompt);
+        if (storedPrompt) setCustomSolvePrompt(storedPrompt);
+
+        const storedOrder = localStorage.getItem("scannerApp_imageSolveProviderOrder");
+        if (storedOrder) {
+            try {
+                const parsed = JSON.parse(storedOrder);
+                if (Array.isArray(parsed) && parsed.length > 0) setImageSolveProviderOrder(parsed);
+            } catch { /* ignore */ }
         }
 
-        const storedImageSolvePrimaryProvider = localStorage.getItem("scannerApp_imageSolvePrimaryProvider");
-        if (storedImageSolvePrimaryProvider === "chatgpt" || storedImageSolvePrimaryProvider === "gemini") {
-            setImageSolvePrimaryProvider(storedImageSolvePrimaryProvider);
+        const storedEnabled = localStorage.getItem("scannerApp_imageSolveProviderEnabled");
+        if (storedEnabled) {
+            try {
+                const parsed = JSON.parse(storedEnabled);
+                if (parsed && typeof parsed === "object") setImageSolveProviderEnabled(parsed);
+            } catch { /* ignore */ }
         }
 
         setIsLoaded(true);
         setMounted(true);
     }, []);
 
-    // Persist to localStorage whenever savedQuestions changes
+    // ── Persist state ─────────────────────────────────────────────────────────
     useEffect(() => {
         if (isLoaded) {
             localStorage.setItem("scannerApp_savedQuestions", JSON.stringify(savedQuestions));
             localStorage.setItem("scannerApp_solvePrompt", customSolvePrompt);
-            localStorage.setItem("scannerApp_imageSolvePrimaryProvider", imageSolvePrimaryProvider);
+            localStorage.setItem("scannerApp_imageSolveProviderOrder", JSON.stringify(imageSolveProviderOrder));
+            localStorage.setItem("scannerApp_imageSolveProviderEnabled", JSON.stringify(imageSolveProviderEnabled));
         }
-    }, [savedQuestions, customSolvePrompt, imageSolvePrimaryProvider, isLoaded]);
+    }, [savedQuestions, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, isLoaded]);
 
+    // ── Load image solve history ──────────────────────────────────────────────
     useEffect(() => {
         if (!mounted) return;
-        loadPollingSolveItems()
-            .then((items) => {
-                setPollingSolveResults(items);
-                setIsPollingResultsLoaded(true);
-            })
-            .catch((error) => {
-                console.error("Failed to load polling solve results", error);
-                setIsPollingResultsLoaded(true);
-            });
-
         loadImageSolveItems()
             .then((items) => {
                 setImageSolveResults(items);
@@ -828,12 +328,14 @@ export default function ScannerApp() {
             });
     }, [mounted]);
 
+    // ── DB helpers ────────────────────────────────────────────────────────────
     const upsertImageSolveItem = useCallback((item: StoredImageSolveItem) => {
         setImageSolveResults((prev) => {
-            const withoutCurrent = prev.filter((existingItem) => existingItem.id !== item.id);
-            return [item, ...withoutCurrent].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            const withoutCurrent = prev.filter((e) => e.id !== item.id);
+            return [item, ...withoutCurrent].sort(
+                (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+            );
         });
-
         saveImageSolveItem(item).catch((error) => {
             console.error("Failed to save image solve result", error);
         });
@@ -846,37 +348,7 @@ export default function ScannerApp() {
         });
     }, []);
 
-    const upsertPollingSolveItem = useCallback((item: PollingSolveItem) => {
-        setPollingSolveResults((prev) => {
-            const withoutCurrent = prev.filter((existingItem) => existingItem.id !== item.id);
-            return [item, ...withoutCurrent].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        });
-
-        savePollingSolveItem(item).catch((error) => {
-            console.error("Failed to save polling solve result", error);
-        });
-    }, []);
-
-    const clearPollingSolveStack = useCallback(() => {
-        setPollingSolveResults([]);
-        clearPollingSolveItems().catch((error) => {
-            console.error("Failed to clear polling solve results", error);
-        });
-    }, []);
-
-    const resetPollingBaseline = useCallback(() => {
-        pollingBaselineRef.current = null;
-        pollingDetectionPausedRef.current = false;
-        pollingConfidenceSamplesRef.current = [];
-        pollingConfidenceWindowStartRef.current = null;
-        documentDetectorRef.current = null;
-        setDocumentDetectorStatus("idle");
-        setDocumentDetectorError(null);
-        setDocumentDetectorReloadKey((key) => key + 1);
-        setPollingDetection(emptySheetDetection);
-        setPollingSolveCountdown(null);
-    }, []);
-
+    // ── Camera ────────────────────────────────────────────────────────────────
     const stopCamera = useCallback(() => {
         cameraRunIdRef.current += 1;
         streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -911,7 +383,6 @@ export default function ScannerApp() {
             }
 
             streamRef.current = stream;
-
             const video = videoRef.current;
             if (video) {
                 video.srcObject = stream;
@@ -935,6 +406,7 @@ export default function ScannerApp() {
         return () => stopCamera();
     }, [mounted, startCamera, stopCamera]);
 
+    // ── Canvas capture helpers ────────────────────────────────────────────────
     const drawCaptureToCanvas = useCallback((
         source: CanvasImageSource,
         sourceWidth: number,
@@ -959,7 +431,6 @@ export default function ScannerApp() {
             ctx.scale(-1, 1);
         }
         ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
-
         return canvas;
     }, []);
 
@@ -971,7 +442,6 @@ export default function ScannerApp() {
 
         while (dataUrl.length > options.maxDataUrlLength && attempts < 12) {
             attempts += 1;
-
             if (quality > options.minQuality + 0.01) {
                 quality = Math.max(options.minQuality, quality - 0.08);
             } else {
@@ -980,7 +450,6 @@ export default function ScannerApp() {
                 resizedCanvas.height = Math.max(1, Math.round(canvas.height * 0.84));
                 const resizedCtx = resizedCanvas.getContext("2d", { alpha: false });
                 if (!resizedCtx) throw new Error("Could not resize captured image.");
-
                 resizedCtx.fillStyle = "#ffffff";
                 resizedCtx.fillRect(0, 0, resizedCanvas.width, resizedCanvas.height);
                 resizedCtx.imageSmoothingEnabled = true;
@@ -989,7 +458,6 @@ export default function ScannerApp() {
                 canvas = resizedCanvas;
                 quality = options.quality;
             }
-
             dataUrl = canvas.toDataURL(options.mimeType, quality);
         }
 
@@ -1010,7 +478,10 @@ export default function ScannerApp() {
         if (!video) return null;
 
         if (video.videoWidth && video.videoHeight) {
-            const canvas = drawCaptureToCanvas(video, video.videoWidth, video.videoHeight, Boolean(options.mirrorHorizontal), options);
+            const canvas = drawCaptureToCanvas(
+                video, video.videoWidth, video.videoHeight,
+                Boolean(options.mirrorHorizontal), options
+            );
             console.log(`Captured video frame at ${video.videoWidth}x${video.videoHeight}`);
             return encodeCanvasWithinLimit(canvas, options);
         }
@@ -1021,20 +492,15 @@ export default function ScannerApp() {
     const getCaptureResolution = () => {
         const video = videoRef.current;
         if (!video) return null;
-        return {
-            width: video.videoWidth,
-            height: video.videoHeight,
-        };
+        return { width: video.videoWidth, height: video.videoHeight };
     };
 
+    // ── Scan mode capture ─────────────────────────────────────────────────────
     const capture = useCallback(async (autoTriggered = false) => {
         if (!videoRef.current) return;
 
-        // Haptic feedback for timer-triggered captures.
         if (autoTriggered) {
-            try {
-                if ("vibrate" in navigator) navigator.vibrate([100, 50, 100]);
-            } catch { }
+            try { if ("vibrate" in navigator) navigator.vibrate([100, 50, 100]); } catch { }
         }
 
         setIsCapturing(true);
@@ -1059,7 +525,6 @@ export default function ScannerApp() {
             const response = await fetch("/api/scan", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                // Send the flipped image!
                 body: JSON.stringify({ image: base64Image }),
             });
 
@@ -1071,40 +536,26 @@ export default function ScannerApp() {
             const data = await response.json();
             const newQuestions: ScannedQuestion[] = data.questions || [];
 
-            // Accumulate questions, ignoring ones that already exist by number
             setSavedQuestions(prev => {
                 const updatedList = [...prev];
-
                 newQuestions.forEach(newQ => {
-                    // Create a normalized string of the first ~25 alphanumeric characters for comparison
                     const getLexicalPrefix = (str: string) => str.replace(/[^a-zA-Z0-9]/g, '').toLowerCase().substring(0, 25);
                     const newPrefix = getLexicalPrefix(newQ.text || "");
-
-                    // Check if question text is extremely similar (meaning it has the same prefix)
-                    const isSimilar = updatedList.some(
-                        existingQ => {
-                            const existingPrefix = getLexicalPrefix(existingQ.text || "");
-                            // Return true if either prefix is entirely contained within the other
-                            // and the prefix is at least 15 characters long to prevent false positives on very short questions
-                            const minLength = Math.min(newPrefix.length, existingPrefix.length);
-                            if (minLength < 15) {
-                                // For very short text, require a high degree of similarity or exact match
-                                return newPrefix === existingPrefix && newPrefix.length > 5;
-                            }
-                            return newPrefix.startsWith(existingPrefix) || existingPrefix.startsWith(newPrefix);
+                    const isSimilar = updatedList.some(existingQ => {
+                        const existingPrefix = getLexicalPrefix(existingQ.text || "");
+                        const minLength = Math.min(newPrefix.length, existingPrefix.length);
+                        if (minLength < 15) {
+                            return newPrefix === existingPrefix && newPrefix.length > 5;
                         }
-                    );
-
+                        return newPrefix.startsWith(existingPrefix) || existingPrefix.startsWith(newPrefix);
+                    });
                     if (!isSimilar) {
                         updatedList.push({
                             ...newQ,
-                            // Ignore the ID from the API because if we scan twice, it might return 'id: 1' both times
                             id: `q-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`
                         });
                     }
                 });
-
-                // Return the updated list in the exact order items were processed
                 return updatedList;
             });
 
@@ -1116,18 +567,12 @@ export default function ScannerApp() {
         }
     }, [captureHighQualityFrame]);
 
-    // Timer logic for 6-second countdown
+    // ── Countdown for scan ────────────────────────────────────────────────────
     useEffect(() => {
         if (countdown === null) return;
-
         if (countdown > 0) {
             const timer = setTimeout(() => setCountdown(countdown - 1), 1000);
-
-            // Optional: Play a tick sound here so the user can hear the countdown
-            try {
-                if ("vibrate" in navigator) navigator.vibrate(50);
-            } catch { }
-
+            try { if ("vibrate" in navigator) navigator.vibrate(50); } catch { }
             return () => clearTimeout(timer);
         } else if (countdown === 0) {
             setCountdown(null);
@@ -1135,23 +580,12 @@ export default function ScannerApp() {
         }
     }, [countdown, capture]);
 
-
     const startManualScan = () => {
         if (scanStatus === "scanning" || countdown !== null) return;
         setCountdown(captureDelay);
     };
 
-    const startImageSolve = () => {
-        if (
-            imageSolveStatus === "solving" ||
-            imageSolveStatus === "capturing" ||
-            imageSolveBackupStatus === "queued" ||
-            imageSolveBackupStatus === "solving" ||
-            imageSolveCountdown !== null
-        ) return;
-        setImageSolveCountdown(captureDelay);
-    };
-
+    // ── Image Solve: shared result apply ──────────────────────────────────────
     const clearImageSolveResult = useCallback(() => {
         imageSolveRunIdRef.current += 1;
         setImageSolveStatus("idle");
@@ -1169,122 +603,13 @@ export default function ScannerApp() {
         setExpandedSolverScreenshot(null);
     }, []);
 
-    const handleImageSolvePrimaryProviderChange = (provider: ImageSolveProvider) => {
-        if (provider === imageSolvePrimaryProvider) return;
-
-        if (
-            imageSolveStatus === "solving" ||
-            imageSolveStatus === "capturing" ||
-            imageSolveCountdown !== null ||
-            pollingSolveCountdown !== null ||
-            isPollingSolveActive
-        ) return;
-
-        setImageSolvePrimaryProvider(provider);
-        clearImageSolveResult();
-    };
-
-    const resetScanner = () => {
-        // We do NOT clear savedQuestions here, we just wipe errors/status
-        setScanStatus("idle");
-        setErrorMessage("");
-        setCountdown(null);
-    };
-
-    const clearAllQuestions = () => {
-        setSavedQuestions([]);
-        setSelectedQuestionIds(new Set());
-        setScanStatus("idle");
-    };
-
-    const deleteQuestion = (idToDelete: string) => {
-        setSavedQuestions(prev => prev.filter(q => q.id !== idToDelete));
-        setSelectedQuestionIds(prev => {
-            const next = new Set(prev);
-            next.delete(idToDelete);
-            return next;
-        });
-        setExpandedSolutionIds(prev => {
-            const next = new Set(prev);
-            next.delete(idToDelete);
-            return next;
-        });
-    };
-
-    const toggleSolutionExpanded = (id: string) => {
-        setExpandedSolutionIds(prev => {
-            const next = new Set(prev);
-            if (next.has(id)) next.delete(id);
-            else next.add(id);
-            return next;
-        });
-    };
-
-    const handleCardClick = (id: string, hasSolution: boolean) => {
-        if (editingId === id) return;
-
-        if (hasSolution) {
-            toggleSolutionExpanded(id);
-        } else {
-            toggleSelection(id);
-        }
-    };
-
-    const toggleSelection = (id: string) => {
-        // Prevent selection if we're in edit mode for this card clicking around
-        if (editingId === id) return;
-
-        setSelectedQuestionIds(prev => {
-            const next = new Set(prev);
-            if (next.has(id)) next.delete(id);
-            else next.add(id);
-            return next;
-        });
-    };
-
-    // --- Long Press Edit Logic ---
-    const handlePointerDown = (q: ScannedQuestion) => {
-        if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-        longPressTimerRef.current = setTimeout(() => {
-            // Trigger edit mode after 600ms long press
-            setEditingId(q.id);
-            setEditingText(q.text);
-            try {
-                if ("vibrate" in navigator) navigator.vibrate(50); // haptic feedback
-            } catch { }
-        }, 600);
-    };
-
-    const handlePointerUp = () => {
-        if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-    };
-
-    const handlePointerLeave = () => {
-        if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-    };
-
-    const saveEdit = (id: string, e: React.MouseEvent) => {
-        e.stopPropagation();
-        setSavedQuestions(prev => prev.map(q =>
-            q.id === id ? { ...q, text: editingText } : q
-        ));
-        setEditingId(null);
-        setEditingText("");
-    };
-
-    const cancelEdit = (e: React.MouseEvent) => {
-        e.stopPropagation();
-        setEditingId(null);
-        setEditingText("");
-    };
-
-    // ── Image Solve: capture frame → /api/image-solve → show answer ──────────
+    // ── Image Solve: camera capture → solve ───────────────────────────────────
     const captureAndImageSolve = useCallback(async () => {
         if (!videoRef.current || imageSolveStatus === "solving" || imageSolveStatus === "capturing") return;
 
         const runId = imageSolveRunIdRef.current + 1;
         imageSolveRunIdRef.current = runId;
-        const isCurrentImageSolveRun = () => imageSolveRunIdRef.current === runId;
+        const isCurrentRun = () => imageSolveRunIdRef.current === runId;
 
         setImageSolveStatus("capturing");
         setImageSolveAnswer(null);
@@ -1297,9 +622,12 @@ export default function ScannerApp() {
         setImageSolveBrowserError(null);
         setImageSolveAnswerProvider(null);
 
-        const requestPrimaryProvider = imageSolvePrimaryProvider;
-        const requestBackupProvider = getBackupProvider(requestPrimaryProvider);
+        // Derive providers from the ordered+enabled list
+        const enabledProviders = imageSolveProviderOrder.filter(p => imageSolveProviderEnabled[p]);
+        const requestPrimaryProvider = (enabledProviders[0] ?? "chatgpt") as ImageSolveProvider;
+        const requestBackupProvider = (enabledProviders[1] ?? null) as ImageSolveProvider | null;
         setImageSolveBackupProvider(requestBackupProvider);
+
         let currentImageSolveItem: StoredImageSolveItem | null = null;
 
         const persistImageSolvePatch = (patch: Partial<StoredImageSolveItem>) => {
@@ -1312,13 +640,13 @@ export default function ScannerApp() {
         try {
             base64Image = await captureHighQualityFrame(imageSolveCaptureOptions);
         } catch (err: unknown) {
-            if (!isCurrentImageSolveRun()) return;
+            if (!isCurrentRun()) return;
             setImageSolveStatus("error");
             setImageSolveError(`Image capture failed: ${getErrorMessage(err)}`);
             return;
         }
 
-        if (!isCurrentImageSolveRun()) return;
+        if (!isCurrentRun()) return;
 
         if (!base64Image) {
             setImageSolveStatus("error");
@@ -1337,6 +665,10 @@ export default function ScannerApp() {
             console.log(`Captured image-solve frame at ${resolution.width}x${resolution.height}`);
         }
 
+        // Store for retry
+        setLastSolvedImageBase64(base64Image);
+        setLastSolvedPrompt(customSolvePrompt);
+
         currentImageSolveItem = {
             id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             createdAt: new Date().toISOString(),
@@ -1344,6 +676,7 @@ export default function ScannerApp() {
             source: "camera",
             status: "solving",
             primaryProvider: requestPrimaryProvider,
+            prompt: customSolvePrompt,
             backupStatus: "idle",
             backupProvider: requestBackupProvider,
         };
@@ -1363,14 +696,14 @@ export default function ScannerApp() {
 
             const data = await readImageSolveResponse(response);
 
-            if (!isCurrentImageSolveRun()) return;
+            if (!isCurrentRun()) return;
 
             if (!response.ok || (data.error && !data.jobId && !data.fallbackRequired)) {
                 throw new Error(data.error || `Server returned ${response.status}`);
             }
 
             const applyImageSolveData = (statusData: ImageSolveStatusData) => {
-                if (!isCurrentImageSolveRun()) return true;
+                if (!isCurrentRun()) return true;
 
                 const browserError =
                     statusData.browserError ||
@@ -1390,22 +723,14 @@ export default function ScannerApp() {
                     setImageSolveScreenshot(primaryScreenshot);
                     setImageSolveAnswerProvider(resultProvider);
                     setImageSolveStatus("done");
-                    persistImageSolvePatch({
-                        screenshot: primaryScreenshot,
-                        answerProvider: resultProvider,
-                        status: "done",
-                    });
+                    persistImageSolvePatch({ screenshot: primaryScreenshot, answerProvider: resultProvider, status: "done" });
                 }
 
                 if (primaryAnswer) {
                     setImageSolveAnswer(primaryAnswer);
                     setImageSolveAnswerProvider(resultProvider);
                     setImageSolveStatus("done");
-                    persistImageSolvePatch({
-                        answer: primaryAnswer,
-                        answerProvider: resultProvider,
-                        status: "done",
-                    });
+                    persistImageSolvePatch({ answer: primaryAnswer, answerProvider: resultProvider, status: "done" });
                 }
 
                 if (statusData.backupStatus) {
@@ -1422,10 +747,7 @@ export default function ScannerApp() {
                 if (statusData.backupAnswer) {
                     setImageSolveBackupAnswer(statusData.backupAnswer);
                     setImageSolveBackupStatus("done");
-                    persistImageSolvePatch({
-                        backupAnswer: statusData.backupAnswer,
-                        backupStatus: "done",
-                    });
+                    persistImageSolvePatch({ backupAnswer: statusData.backupAnswer, backupStatus: "done" });
                 }
 
                 if (statusData.backupScreenshot) {
@@ -1447,19 +769,13 @@ export default function ScannerApp() {
                 if (statusData.backupError) {
                     setImageSolveBackupError(statusData.backupError);
                     setImageSolveBackupStatus("error");
-                    persistImageSolvePatch({
-                        backupError: statusData.backupError,
-                        backupStatus: "error",
-                    });
+                    persistImageSolvePatch({ backupError: statusData.backupError, backupStatus: "error" });
                 }
 
                 if (!primaryAnswer && !primaryScreenshot && statusData.status === "error") {
                     setImageSolveError(statusData.error || "Image solve failed.");
                     setImageSolveStatus("error");
-                    persistImageSolvePatch({
-                        error: statusData.error || "Image solve failed.",
-                        status: "error",
-                    });
+                    persistImageSolvePatch({ error: statusData.error || "Image solve failed.", status: "error" });
                     return true;
                 }
 
@@ -1491,16 +807,13 @@ export default function ScannerApp() {
                 });
                 const fallbackData = await readImageSolveResponse(fallbackResponse);
 
-                if (!isCurrentImageSolveRun()) return;
+                if (!isCurrentRun()) return;
 
                 if (!fallbackResponse.ok) {
                     const fallbackError = fallbackData.error || `Fallback returned ${fallbackResponse.status}`;
                     setImageSolveBackupStatus("error");
                     setImageSolveBackupError(fallbackError);
-                    persistImageSolvePatch({
-                        backupStatus: "error",
-                        backupError: fallbackError,
-                    });
+                    persistImageSolvePatch({ backupStatus: "error", backupError: fallbackError });
                     throw new Error(fallbackError);
                 }
 
@@ -1513,21 +826,14 @@ export default function ScannerApp() {
             if (data.jobId) {
                 const pollInterval = setInterval(async () => {
                     try {
-                        if (!isCurrentImageSolveRun()) {
-                            clearInterval(pollInterval);
-                            return;
-                        }
-
+                        if (!isCurrentRun()) { clearInterval(pollInterval); return; }
                         const statusRes = await fetch(`/api/image-solve/status?jobId=${data.jobId}`);
-                        if (!statusRes.ok) return; // ignore temporary network errors
+                        if (!statusRes.ok) return;
                         const statusData = await readImageSolveResponse(statusRes);
-
                         const shouldStop = applyImageSolveData(statusData);
-                        if (shouldStop) {
-                            clearInterval(pollInterval);
-                        }
+                        if (shouldStop) clearInterval(pollInterval);
                     } catch (e: unknown) {
-                        console.error("Polling error:", e);
+                        console.error("Status poll error:", e);
                     }
                 }, 3000);
             } else if (!data.primaryScreenshot && !data.backupScreenshot) {
@@ -1541,24 +847,23 @@ export default function ScannerApp() {
                 });
             }
         } catch (err: unknown) {
-            if (!isCurrentImageSolveRun()) return;
+            if (!isCurrentRun()) return;
             const message = getErrorMessage(err);
             setImageSolveError(message);
             setImageSolveStatus("error");
-            persistImageSolvePatch({
-                error: message,
-                status: "error",
-            });
+            persistImageSolvePatch({ error: message, status: "error" });
         }
-    }, [imageSolveStatus, customSolvePrompt, imageSolvePrimaryProvider, captureHighQualityFrame, upsertImageSolveItem]);
+    }, [imageSolveStatus, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, captureHighQualityFrame, upsertImageSolveItem]);
 
-    // ── Image Solve: solve from uploaded file ─────────────────────────────────
-    const solveWithUploadedImage = useCallback(async (base64Image: string) => {
+    // ── Image Solve: solve from image (upload or retry) ───────────────────────
+    const solveWithUploadedImage = useCallback(async (base64Image: string, promptOverride?: string) => {
         if (imageSolveStatus === "solving" || imageSolveStatus === "capturing") return;
 
         const runId = imageSolveRunIdRef.current + 1;
         imageSolveRunIdRef.current = runId;
         const isCurrentRun = () => imageSolveRunIdRef.current === runId;
+
+        const solvePrompt = promptOverride ?? customSolvePrompt;
 
         setImageSolveStatus("solving");
         setImageSolveAnswer(null);
@@ -1571,9 +876,16 @@ export default function ScannerApp() {
         setImageSolveBrowserError(null);
         setImageSolveAnswerProvider(null);
 
-        const requestPrimaryProvider = imageSolvePrimaryProvider;
-        const requestBackupProvider = getBackupProvider(requestPrimaryProvider);
+        // Derive providers from the ordered+enabled list
+        const enabledProviders = imageSolveProviderOrder.filter(p => imageSolveProviderEnabled[p]);
+        const requestPrimaryProvider = (enabledProviders[0] ?? "chatgpt") as ImageSolveProvider;
+        const requestBackupProvider = (enabledProviders[1] ?? null) as ImageSolveProvider | null;
         setImageSolveBackupProvider(requestBackupProvider);
+
+        // Store for retry
+        setLastSolvedImageBase64(base64Image);
+        setLastSolvedPrompt(solvePrompt);
+
         let currentImageSolveItem: StoredImageSolveItem = {
             id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             createdAt: new Date().toISOString(),
@@ -1581,6 +893,7 @@ export default function ScannerApp() {
             source: "upload",
             status: "solving",
             primaryProvider: requestPrimaryProvider,
+            prompt: solvePrompt,
             backupStatus: "idle",
             backupProvider: requestBackupProvider,
         };
@@ -1598,7 +911,7 @@ export default function ScannerApp() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     image: base64Image,
-                    prompt: customSolvePrompt,
+                    prompt: solvePrompt,
                     primaryProvider: requestPrimaryProvider,
                 }),
             });
@@ -1612,7 +925,10 @@ export default function ScannerApp() {
 
             const applyData = (statusData: ImageSolveStatusData) => {
                 if (!isCurrentRun()) return true;
-                const browserError = statusData.browserError || statusData.primaryError || (!statusData.primaryAnswer && statusData.error ? statusData.error : null);
+                const browserError =
+                    statusData.browserError ||
+                    statusData.primaryError ||
+                    (!statusData.primaryAnswer && statusData.error ? statusData.error : null);
                 if (browserError) {
                     setImageSolveBrowserError(browserError);
                     persistImageSolvePatch({ browserError });
@@ -1673,7 +989,13 @@ export default function ScannerApp() {
                     persistImageSolvePatch({ error: message, status: "error" });
                     return true;
                 }
-                return (statusData.backupStatus === "done" || statusData.backupStatus === "error" || Boolean(statusData.backupAnswer) || Boolean(statusData.backupScreenshot) || Boolean(statusData.backupError));
+                return (
+                    statusData.backupStatus === "done" ||
+                    statusData.backupStatus === "error" ||
+                    Boolean(statusData.backupAnswer) ||
+                    Boolean(statusData.backupScreenshot) ||
+                    Boolean(statusData.backupError)
+                );
             };
 
             applyData(data);
@@ -1684,7 +1006,13 @@ export default function ScannerApp() {
                 const fallbackResponse = await fetch("/api/image-solve", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ image: base64Image, prompt: customSolvePrompt, primaryProvider: requestPrimaryProvider, useFallbackOnly: true, browserError: data.browserError || data.primaryError || data.error }),
+                    body: JSON.stringify({
+                        image: base64Image,
+                        prompt: solvePrompt,
+                        primaryProvider: requestPrimaryProvider,
+                        useFallbackOnly: true,
+                        browserError: data.browserError || data.primaryError || data.error,
+                    }),
                 });
                 const fallbackData = await readImageSolveResponse(fallbackResponse);
                 if (!isCurrentRun()) return;
@@ -1709,7 +1037,7 @@ export default function ScannerApp() {
                         if (!statusRes.ok) return;
                         const statusData = await readImageSolveResponse(statusRes);
                         if (applyData(statusData)) clearInterval(pollInterval);
-                    } catch (e: unknown) { console.error("Polling error:", e); }
+                    } catch (e: unknown) { console.error("Status poll error:", e); }
                 }, 3000);
             } else if (!data.primaryScreenshot && !data.backupScreenshot) {
                 setImageSolveAnswer(data.answer || "(No answer returned)");
@@ -1728,376 +1056,26 @@ export default function ScannerApp() {
             setImageSolveStatus("error");
             persistImageSolvePatch({ error: message, status: "error" });
         }
-    }, [imageSolveStatus, customSolvePrompt, imageSolvePrimaryProvider, upsertImageSolveItem]);
+    }, [imageSolveStatus, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, upsertImageSolveItem]);
 
-    const solvePollingImage = useCallback(async (base64Image: string) => {
-        if (pollingSolveActiveRef.current) return;
+    // ── Retry current result ──────────────────────────────────────────────────
+    const handleRetry = useCallback(() => {
+        const img = lastSolvedImageBase64;
+        const prompt = lastSolvedPrompt ?? customSolvePrompt;
+        if (!img) return;
+        clearImageSolveResult();
+        // Allow state reset to flush, then start the new solve
+        setTimeout(() => solveWithUploadedImage(img, prompt), 0);
+    }, [lastSolvedImageBase64, lastSolvedPrompt, customSolvePrompt, clearImageSolveResult, solveWithUploadedImage]);
 
-        pollingSolveActiveRef.current = true;
-        setIsPollingSolveActive(true);
-        const requestPrimaryProvider = imageSolvePrimaryProvider;
-        const requestBackupProvider = getBackupProvider(requestPrimaryProvider);
-        let currentItem: PollingSolveItem = {
-            id: `poll-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            createdAt: new Date().toISOString(),
-            image: base64Image,
-            status: "solving",
-            primaryProvider: requestPrimaryProvider,
-            backupStatus: "idle",
-            backupProvider: requestBackupProvider,
-        };
+    // ── Retry from history card ───────────────────────────────────────────────
+    const handleRetryItem = useCallback((item: StoredImageSolveItem) => {
+        if (!item.image) return;
+        clearImageSolveResult();
+        setTimeout(() => solveWithUploadedImage(item.image, item.prompt), 0);
+    }, [clearImageSolveResult, solveWithUploadedImage]);
 
-        const persistPatch = (patch: Partial<PollingSolveItem>) => {
-            currentItem = { ...currentItem, ...patch };
-            upsertPollingSolveItem(currentItem);
-        };
-
-        upsertPollingSolveItem(currentItem);
-
-        const applyPollingData = (statusData: ImageSolveStatusData) => {
-            const browserError =
-                statusData.browserError ||
-                statusData.primaryError ||
-                (!statusData.primaryAnswer && statusData.error ? statusData.error : null);
-            const primaryAnswer = statusData.primaryAnswer || statusData.answer;
-            const primaryScreenshot = statusData.primaryScreenshot;
-            const resultProvider = statusData.provider || statusData.source || requestPrimaryProvider;
-            const normalizedBackupProvider = normalizeImageSolveProvider(statusData.backupProvider);
-
-            const patch: Partial<PollingSolveItem> = {};
-            if (browserError) patch.browserError = browserError;
-            if (primaryAnswer) {
-                patch.answer = primaryAnswer;
-                patch.answerProvider = resultProvider;
-                patch.status = "done";
-            }
-            if (primaryScreenshot) {
-                patch.screenshot = primaryScreenshot;
-                patch.answerProvider = resultProvider;
-                patch.status = "done";
-            }
-            if (statusData.backupStatus) patch.backupStatus = statusData.backupStatus;
-            if (normalizedBackupProvider) patch.backupProvider = normalizedBackupProvider;
-            if (statusData.backupAnswer) {
-                patch.backupAnswer = statusData.backupAnswer;
-                patch.backupStatus = "done";
-            }
-            if (statusData.backupScreenshot) {
-                patch.backupScreenshot = statusData.backupScreenshot;
-                patch.backupStatus = "done";
-                if (!primaryAnswer && !primaryScreenshot) {
-                    patch.answerProvider = normalizedBackupProvider || statusData.provider || requestBackupProvider;
-                    patch.status = "done";
-                }
-            }
-            if (statusData.backupError) {
-                patch.backupError = statusData.backupError;
-                patch.backupStatus = "error";
-            }
-            if (!primaryAnswer && !primaryScreenshot && statusData.status === "error") {
-                patch.error = statusData.error || "Image solve failed.";
-                patch.status = "error";
-            }
-
-            persistPatch(patch);
-
-            return (
-                statusData.backupStatus === "done" ||
-                statusData.backupStatus === "error" ||
-                Boolean(statusData.backupAnswer) ||
-                Boolean(statusData.backupScreenshot) ||
-                Boolean(statusData.backupError)
-            );
-        };
-
-        try {
-            const response = await fetch("/api/image-solve", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    image: base64Image,
-                    prompt: customSolvePrompt,
-                    primaryProvider: requestPrimaryProvider,
-                }),
-            });
-
-            const data = await readImageSolveResponse(response);
-            if (!response.ok || (data.error && !data.jobId && !data.fallbackRequired)) {
-                throw new Error(data.error || `Server returned ${response.status}`);
-            }
-
-            applyPollingData(data);
-
-            if (data.fallbackRequired) {
-                persistPatch({ backupStatus: "solving" });
-                const fallbackResponse = await fetch("/api/image-solve", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        image: base64Image,
-                        prompt: customSolvePrompt,
-                        primaryProvider: requestPrimaryProvider,
-                        useFallbackOnly: true,
-                        browserError: data.browserError || data.primaryError || data.error,
-                    }),
-                });
-                const fallbackData = await readImageSolveResponse(fallbackResponse);
-                if (!fallbackResponse.ok) {
-                    const fallbackError = fallbackData.error || `Fallback returned ${fallbackResponse.status}`;
-                    persistPatch({ backupStatus: "error", backupError: fallbackError, status: currentItem.status === "done" ? "done" : "error", error: fallbackError });
-                    return;
-                }
-                applyPollingData(fallbackData);
-                return;
-            }
-
-            if (data.jobId) {
-                await new Promise<void>((resolve) => {
-                    const pollInterval = setInterval(async () => {
-                        try {
-                            const statusRes = await fetch(`/api/image-solve/status?jobId=${data.jobId}`);
-                            if (!statusRes.ok) return;
-                            const statusData = await readImageSolveResponse(statusRes);
-                            const shouldStop = applyPollingData(statusData);
-                            if (shouldStop) {
-                                clearInterval(pollInterval);
-                                resolve();
-                            }
-                        } catch (error) {
-                            console.error("Polling solve stack status error:", error);
-                        }
-                    }, 3000);
-
-                    setTimeout(() => {
-                        clearInterval(pollInterval);
-                        resolve();
-                    }, 300000);
-                });
-            } else if (!data.primaryScreenshot && !data.backupScreenshot) {
-                persistPatch({
-                    answer: data.answer || "(No answer returned)",
-                    answerProvider: data.provider || data.source || null,
-                    status: "done",
-                });
-            }
-        } catch (error: unknown) {
-            persistPatch({
-                status: "error",
-                error: getErrorMessage(error),
-            });
-        } finally {
-            pollingSolveActiveRef.current = false;
-            setIsPollingSolveActive(false);
-            pollingDetectionPausedRef.current = false;
-            pollingConfidenceSamplesRef.current = [];
-            pollingConfidenceWindowStartRef.current = null;
-            setPollingDetection({
-                ...emptySheetDetection,
-                baselineReady: true,
-                modelStatus: documentDetectorRef.current ? "ready" : documentDetectorStatus,
-            });
-            pollingCooldownUntilRef.current = Date.now() + 5000;
-        }
-    }, [customSolvePrompt, documentDetectorStatus, imageSolvePrimaryProvider, upsertPollingSolveItem]);
-
-    useEffect(() => {
-        if (!pollingSolveMode || imageSolveUploadMode) {
-            setDocumentDetectorStatus(documentDetectorRef.current ? "ready" : "idle");
-            return;
-        }
-
-        if (documentDetectorRef.current) {
-            setDocumentDetectorStatus("ready");
-            setDocumentDetectorError(null);
-            return;
-        }
-
-        let cancelled = false;
-        const loadId = documentDetectorLoadIdRef.current + 1;
-        documentDetectorLoadIdRef.current = loadId;
-
-        setDocumentDetectorStatus("loading");
-        setDocumentDetectorError(null);
-
-        loadDocumentDetector()
-            .then((detector) => {
-                if (cancelled || documentDetectorLoadIdRef.current !== loadId) return;
-                documentDetectorRef.current = detector;
-                setDocumentDetectorStatus("ready");
-                setDocumentDetectorError(null);
-            })
-            .catch((error) => {
-                if (cancelled || documentDetectorLoadIdRef.current !== loadId) return;
-                const message = getErrorMessage(error, "Document detector failed to load.");
-                setDocumentDetectorStatus(message === "DOCUMENT_DETECTOR_MODEL_MISSING" ? "missing" : "error");
-                setDocumentDetectorError(
-                    message === "DOCUMENT_DETECTOR_MODEL_MISSING"
-                        ? `Missing ${documentDetectorModelPath}`
-                        : message,
-                );
-                documentDetectorRef.current = null;
-            });
-
-        return () => {
-            cancelled = true;
-        };
-    }, [pollingSolveMode, imageSolveUploadMode, documentDetectorReloadKey]);
-
-    useEffect(() => {
-        if (!pollingSolveEnabled || !pollingSolveMode || imageSolveUploadMode) {
-            pollingBaselineRef.current = null;
-            pollingDetectionPausedRef.current = false;
-            pollingConfidenceSamplesRef.current = [];
-            pollingConfidenceWindowStartRef.current = null;
-            setPollingDetection(emptySheetDetection);
-            return;
-        }
-
-        if (documentDetectorStatus !== "ready" || !documentDetectorRef.current) {
-            setPollingSolveCountdown(null);
-            pollingConfidenceSamplesRef.current = [];
-            pollingConfidenceWindowStartRef.current = null;
-            setPollingDetection({
-                ...emptySheetDetection,
-                baselineReady: documentDetectorStatus === "ready",
-                modelStatus: documentDetectorStatus,
-            });
-            return;
-        }
-
-        if (pollingSolveCountdown !== null || pollingDetectionPausedRef.current || pollingSolveActiveRef.current) {
-            return;
-        }
-
-        let inferenceInFlight = false;
-
-        const interval = window.setInterval(async () => {
-            if (inferenceInFlight) return;
-            const video = videoRef.current;
-            const canvas = pollingDetectionCanvasRef.current;
-            const detector = documentDetectorRef.current;
-            if (!video || !canvas || !detector || !video.videoWidth || !video.videoHeight) return;
-
-            inferenceInFlight = true;
-
-            try {
-                const metrics = await detectSheetWithDocumentModel(video, canvas, detector);
-                const now = Date.now();
-                if (pollingConfidenceWindowStartRef.current === null) {
-                    pollingConfidenceWindowStartRef.current = now;
-                    pollingConfidenceSamplesRef.current = [];
-                }
-
-                pollingConfidenceSamplesRef.current = [
-                    ...pollingConfidenceSamplesRef.current,
-                    { time: now, confidence: metrics.modelConfidence },
-                ];
-
-                const windowStart = pollingConfidenceWindowStartRef.current;
-                const windowElapsed = now - windowStart;
-                const samples = pollingConfidenceSamplesRef.current;
-                const meanConfidence = samples.length
-                    ? samples.reduce((sum, sample) => sum + sample.confidence, 0) / samples.length
-                    : 0;
-                const gateProgress = Math.min(1, windowElapsed / documentDetectorConfidenceGateMs);
-                const gateReady =
-                    windowElapsed >= documentDetectorConfidenceGateMs &&
-                    meanConfidence > documentDetectorConfidenceThreshold;
-                const gatedMetrics: SheetDetectionMetrics = {
-                    ...metrics,
-                    detected: gateReady,
-                    modelMeanConfidence: meanConfidence,
-                    modelGateProgress: gateProgress,
-                };
-
-                setPollingDetection(gatedMetrics);
-
-                const busy =
-                    pollingSolveActiveRef.current ||
-                    pollingSolveCountdown !== null ||
-                    imageSolveStatus === "solving" ||
-                    imageSolveStatus === "capturing" ||
-                    imageSolveBackupStatus === "queued" ||
-                    imageSolveBackupStatus === "solving" ||
-                    Date.now() < pollingCooldownUntilRef.current;
-
-                if (!busy && gateReady) {
-                    pollingDetectionPausedRef.current = true;
-                    pollingConfidenceSamplesRef.current = [];
-                    pollingConfidenceWindowStartRef.current = null;
-                    setPollingSolveCountdown(pollingSolveDelay);
-                } else if (windowElapsed >= documentDetectorConfidenceGateMs) {
-                    pollingConfidenceSamplesRef.current = [{ time: now, confidence: metrics.modelConfidence }];
-                    pollingConfidenceWindowStartRef.current = now;
-                }
-            } catch (error) {
-                console.error("Document detector inference failed", error);
-                setDocumentDetectorStatus("error");
-                setDocumentDetectorError(getErrorMessage(error, "Document detector inference failed."));
-                setPollingDetection({
-                    ...emptySheetDetection,
-                    modelStatus: "error",
-                    baselineReady: true,
-                });
-            } finally {
-                inferenceInFlight = false;
-            }
-        }, 300);
-
-        return () => window.clearInterval(interval);
-    }, [
-        pollingSolveEnabled,
-        pollingSolveMode,
-        imageSolveUploadMode,
-        documentDetectorStatus,
-        pollingSolveCountdown,
-        pollingSolveDelay,
-        isPollingSolveActive,
-        imageSolveStatus,
-        imageSolveBackupStatus,
-    ]);
-
-    useEffect(() => {
-        if (pollingSolveCountdown === null) return;
-
-        if (pollingSolveCountdown > 0) {
-            const timer = window.setTimeout(() => setPollingSolveCountdown(pollingSolveCountdown - 1), 1000);
-            return () => window.clearTimeout(timer);
-        }
-
-        const runCapture = async () => {
-            setPollingSolveCountdown(null);
-            pollingCooldownUntilRef.current = Date.now() + 1000;
-            try {
-                const base64Image = await captureHighQualityFrame(imageSolveCaptureOptions);
-                if (!base64Image) throw new Error("Failed to capture image from camera.");
-                await solvePollingImage(base64Image);
-            } catch (error) {
-                const item: PollingSolveItem = {
-                    id: `poll-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                    createdAt: new Date().toISOString(),
-                    image: "",
-                    status: "error",
-                    primaryProvider: imageSolvePrimaryProvider,
-                    error: getErrorMessage(error, "Polling capture failed."),
-                    backupStatus: "idle",
-                };
-                upsertPollingSolveItem(item);
-                pollingDetectionPausedRef.current = false;
-                pollingConfidenceSamplesRef.current = [];
-                pollingConfidenceWindowStartRef.current = null;
-                setPollingDetection({
-                    ...emptySheetDetection,
-                    baselineReady: true,
-                    modelStatus: documentDetectorRef.current ? "ready" : documentDetectorStatus,
-                });
-                pollingCooldownUntilRef.current = Date.now() + 5000;
-            }
-        };
-
-        runCapture();
-    }, [pollingSolveCountdown, captureHighQualityFrame, solvePollingImage, imageSolvePrimaryProvider, upsertPollingSolveItem, documentDetectorStatus]);
-
+    // ── File upload ───────────────────────────────────────────────────────────
     const handleFileUpload = useCallback((file: File) => {
         if (!file.type.startsWith("image/")) return;
         const reader = new FileReader();
@@ -2111,7 +1089,18 @@ export default function ScannerApp() {
         reader.readAsDataURL(file);
     }, [clearImageSolveResult]);
 
-    // Countdown for Image Solve mode
+    // ── Countdown for image solve ─────────────────────────────────────────────
+    const startImageSolve = () => {
+        if (
+            imageSolveStatus === "solving" ||
+            imageSolveStatus === "capturing" ||
+            imageSolveBackupStatus === "queued" ||
+            imageSolveBackupStatus === "solving" ||
+            imageSolveCountdown !== null
+        ) return;
+        setImageSolveCountdown(captureDelay);
+    };
+
     useEffect(() => {
         if (imageSolveCountdown === null) return;
         if (imageSolveCountdown > 0) {
@@ -2124,13 +1113,11 @@ export default function ScannerApp() {
         }
     }, [imageSolveCountdown, captureAndImageSolve]);
 
-
+    // ── Solve selected questions ──────────────────────────────────────────────
     const processSelectedQuestions = async () => {
         if (selectedQuestionIds.size === 0 || isProcessingSolutions) return;
 
         setIsProcessingSolutions(true);
-
-        // Mark specific questions as 'isSolving'
         setSavedQuestions(prev => prev.map(q =>
             selectedQuestionIds.has(q.id) ? { ...q, isSolving: true } : q
         ));
@@ -2146,10 +1133,7 @@ export default function ScannerApp() {
             const response = await fetch("/api/solve", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    questions: questionsToSend,
-                    customSolvePrompt: customSolvePrompt
-                }),
+                body: JSON.stringify({ questions: questionsToSend, customSolvePrompt }),
             });
 
             if (!response.ok) {
@@ -2164,29 +1148,108 @@ export default function ScannerApp() {
                 if (selectedQuestionIds.has(q.id) && solutions[q.id]) {
                     return { ...q, solution: solutions[q.id], isSolving: false };
                 }
-                return { ...q, isSolving: false }; // clear loading state if no solution
+                return { ...q, isSolving: false };
             }));
 
-            // Auto-expand successfully solved questions
             setExpandedSolutionIds(prev => {
                 const next = new Set(prev);
-                selectedQuestionIds.forEach(id => {
-                    if (solutions[id]) next.add(id);
-                });
+                selectedQuestionIds.forEach(id => { if (solutions[id]) next.add(id); });
                 return next;
             });
 
-            // Clear selection after process
             setSelectedQuestionIds(new Set());
-
         } catch (error: unknown) {
             console.error("Solve error:", error);
             alert("Failed to process solutions: " + getErrorMessage(error));
-            // Revert loading states
             setSavedQuestions(prev => prev.map(q => ({ ...q, isSolving: false })));
         } finally {
             setIsProcessingSolutions(false);
         }
+    };
+
+    // ── Provider drag-and-drop ────────────────────────────────────────────────
+    const handleProviderDragStart = (index: number) => {
+        providerDragIndexRef.current = index;
+    };
+
+    const handleProviderDrop = (toIndex: number) => {
+        const fromIndex = providerDragIndexRef.current;
+        if (fromIndex === null || fromIndex === toIndex) {
+            setProviderDragOver(null);
+            return;
+        }
+        const newOrder = [...imageSolveProviderOrder];
+        const [moved] = newOrder.splice(fromIndex, 1);
+        newOrder.splice(toIndex, 0, moved);
+        setImageSolveProviderOrder(newOrder);
+        setProviderDragOver(null);
+        providerDragIndexRef.current = null;
+    };
+
+    // ── Misc scan helpers ─────────────────────────────────────────────────────
+    const resetScanner = () => {
+        setScanStatus("idle");
+        setErrorMessage("");
+        setCountdown(null);
+    };
+
+    const clearAllQuestions = () => {
+        setSavedQuestions([]);
+        setSelectedQuestionIds(new Set());
+        setScanStatus("idle");
+    };
+
+    const deleteQuestion = (idToDelete: string) => {
+        setSavedQuestions(prev => prev.filter(q => q.id !== idToDelete));
+        setSelectedQuestionIds(prev => { const next = new Set(prev); next.delete(idToDelete); return next; });
+        setExpandedSolutionIds(prev => { const next = new Set(prev); next.delete(idToDelete); return next; });
+    };
+
+    const toggleSolutionExpanded = (id: string) => {
+        setExpandedSolutionIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+        });
+    };
+
+    const handleCardClick = (id: string, hasSolution: boolean) => {
+        if (editingId === id) return;
+        if (hasSolution) toggleSolutionExpanded(id); else toggleSelection(id);
+    };
+
+    const toggleSelection = (id: string) => {
+        if (editingId === id) return;
+        setSelectedQuestionIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+        });
+    };
+
+    const handlePointerDown = (q: ScannedQuestion) => {
+        if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = setTimeout(() => {
+            setEditingId(q.id);
+            setEditingText(q.text);
+            try { if ("vibrate" in navigator) navigator.vibrate(50); } catch { }
+        }, 600);
+    };
+
+    const handlePointerUp = () => { if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current); };
+    const handlePointerLeave = () => { if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current); };
+
+    const saveEdit = (id: string, e: React.MouseEvent) => {
+        e.stopPropagation();
+        setSavedQuestions(prev => prev.map(q => q.id === id ? { ...q, text: editingText } : q));
+        setEditingId(null);
+        setEditingText("");
+    };
+
+    const cancelEdit = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        setEditingId(null);
+        setEditingText("");
     };
 
     const filteredQuestions = savedQuestions.filter(q => {
@@ -2198,48 +1261,42 @@ export default function ScannerApp() {
 
     if (!mounted) return null;
 
+    // ── Derived UI values ─────────────────────────────────────────────────────
     const imageSolveBusy =
         imageSolveStatus === "solving" ||
         imageSolveStatus === "capturing" ||
         imageSolveBackupStatus === "queued" ||
-        imageSolveBackupStatus === "solving" ||
-        isPollingSolveActive;
+        imageSolveBackupStatus === "solving";
+
     const imageSolveSelectorLocked =
         imageSolveStatus === "solving" ||
         imageSolveStatus === "capturing" ||
-        imageSolveCountdown !== null ||
-        pollingSolveCountdown !== null ||
-        isPollingSolveActive;
+        imageSolveCountdown !== null;
+
+    const enabledProviders = imageSolveProviderOrder.filter(p => imageSolveProviderEnabled[p]);
+    const activePrimaryProvider = enabledProviders[0] ?? null;
+    const activeBackupProvider = enabledProviders[1] ?? null;
 
     const imageSolveProviderLabel =
         imageSolveAnswerProvider === "chatgpt" ? "ChatGPT Browser" :
             imageSolveAnswerProvider === "gemini" ? "Gemini Browser" :
                 imageSolveAnswerProvider === "gemini-api" ? "Gemini API" :
                     "Image Solve";
-    const imageSolvePrimaryLabel = getProviderLabel(imageSolvePrimaryProvider);
-    const imageSolveDisplayedBackupProvider = imageSolveBackupProvider || getBackupProvider(imageSolvePrimaryProvider);
-    const imageSolveBackupLabel = getProviderLabel(imageSolveDisplayedBackupProvider);
-    const hasImageSolveResult =
-        imageSolveStatus === "done" &&
-        Boolean(imageSolveAnswer || imageSolveScreenshot || imageSolveBackupAnswer || imageSolveBackupScreenshot);
-    const pollingDetectionLabel = (() => {
-        if (documentDetectorStatus === "loading") return "Loading document detector...";
-        if (documentDetectorStatus === "missing") return documentDetectorError || `Missing ${documentDetectorModelPath}`;
-        if (documentDetectorStatus === "error") return documentDetectorError || "Document detector error";
-        if (pollingDetection.detected) {
-            const label = pollingDetection.modelLabel ? `${pollingDetection.modelLabel}, ` : "";
-            return `Sheet window accepted (${label}${Math.round(pollingDetection.modelMeanConfidence * 100)}% mean)`;
-        }
-        if (documentDetectorStatus === "ready") {
-            const windowSeconds = (pollingDetection.modelGateProgress * documentDetectorConfidenceGateMs / 1000).toFixed(1);
-            return `Watching 2s window (${Math.round(pollingDetection.modelMeanConfidence * 100)}% mean, ${windowSeconds}/2.0s)`;
-        }
-        return "Detector idle";
-    })();
 
+    const imageSolvePrimaryLabel = getProviderLabel(activePrimaryProvider);
+    const imageSolveDisplayedBackupProvider = imageSolveBackupProvider || activeBackupProvider;
+    const imageSolveBackupLabel = getProviderLabel(imageSolveDisplayedBackupProvider);
+
+    const hasImageSolveResult =
+        (imageSolveStatus === "done" || imageSolveStatus === "error") &&
+        Boolean(imageSolveAnswer || imageSolveScreenshot || imageSolveBackupAnswer || imageSolveBackupScreenshot || imageSolveError);
+
+    const canRetry = hasImageSolveResult && Boolean(lastSolvedImageBase64) && !imageSolveBusy;
+
+    // ─── Render ───────────────────────────────────────────────────────────────
     return (
         <div className="scanner-layout">
-            {/* Left side: Camera Viewport */}
+            {/* Left side: Camera Viewport + Controls */}
             <div className="scanner-section">
                 <div className="webcam-container">
                     <video
@@ -2250,12 +1307,10 @@ export default function ScannerApp() {
                         playsInline
                     />
                     {cameraError && (
-                        <div className="camera-error-overlay">
-                            {cameraError}
-                        </div>
+                        <div className="camera-error-overlay">{cameraError}</div>
                     )}
 
-                    {/* Overlay scanning effects */}
+                    {/* Scanning overlay */}
                     {scanStatus === "scanning" && (
                         <div className="scanning-overlay">
                             <div className="scan-line"></div>
@@ -2263,10 +1318,10 @@ export default function ScannerApp() {
                         </div>
                     )}
 
-                    {/* Countdown Overlay — shared by both scan and image solve timers */}
-                    {((countdown !== null && countdown > 0) || (imageSolveCountdown !== null && imageSolveCountdown > 0) || (pollingSolveCountdown !== null && pollingSolveCountdown > 0)) && (
+                    {/* Countdown Overlay */}
+                    {((countdown !== null && countdown > 0) || (imageSolveCountdown !== null && imageSolveCountdown > 0)) && (
                         <div className="countdown-overlay">
-                            <span className="countdown-text">{countdown ?? imageSolveCountdown ?? pollingSolveCountdown}</span>
+                            <span className="countdown-text">{countdown ?? imageSolveCountdown}</span>
                         </div>
                     )}
 
@@ -2281,26 +1336,26 @@ export default function ScannerApp() {
                 <div className="controls">
                     {/* Mode toggle */}
                     <div className="solve-mode-toggle">
-                            <button
-                                className={`mode-btn ${!imageSolveMode ? 'active' : ''}`}
-                                onClick={() => {
-                                    if (!imageSolveMode) return;
-                                    setImageSolveMode(false);
-                                    clearImageSolveResult();
-                                }}
-                            >
-                                📄 Scan Mode
-                            </button>
-                            <button
-                                className={`mode-btn ${imageSolveMode ? 'active' : ''}`}
-                                onClick={() => {
-                                    if (imageSolveMode) return;
-                                    setImageSolveMode(true);
-                                    clearImageSolveResult();
-                                }}
-                            >
-                                🧠 Image Solve
-                            </button>
+                        <button
+                            className={`mode-btn ${!imageSolveMode ? 'active' : ''}`}
+                            onClick={() => {
+                                if (!imageSolveMode) return;
+                                setImageSolveMode(false);
+                                clearImageSolveResult();
+                            }}
+                        >
+                            📄 Scan Mode
+                        </button>
+                        <button
+                            className={`mode-btn ${imageSolveMode ? 'active' : ''}`}
+                            onClick={() => {
+                                if (imageSolveMode) return;
+                                setImageSolveMode(true);
+                                clearImageSolveResult();
+                            }}
+                        >
+                            🧠 Image Solve
+                        </button>
                     </div>
 
                     {!imageSolveMode ? (
@@ -2338,72 +1393,73 @@ export default function ScannerApp() {
                             {/* Upload / Camera sub-mode toggle */}
                             <div className="image-solve-source-toggle">
                                 <button
-                                    className={`image-solve-source-btn ${!imageSolveUploadMode && !pollingSolveMode ? 'active' : ''}`}
+                                    className={`image-solve-source-btn ${!imageSolveUploadMode ? 'active' : ''}`}
                                     onClick={() => {
                                         setImageSolveUploadMode(false);
-                                        setPollingSolveMode(false);
-                                        setPollingSolveEnabled(false);
-                                        resetPollingBaseline();
                                         clearImageSolveResult();
                                     }}
-                                    disabled={imageSolveBusy || imageSolveCountdown !== null || pollingSolveCountdown !== null}
+                                    disabled={imageSolveBusy || imageSolveCountdown !== null}
                                 >Camera</button>
-                                <button
-                                    className={`image-solve-source-btn ${pollingSolveMode ? 'active' : ''}`}
-                                    onClick={() => {
-                                        setImageSolveUploadMode(false);
-                                        setPollingSolveMode(true);
-                                        setPollingSolveEnabled(true);
-                                        resetPollingBaseline();
-                                        clearImageSolveResult();
-                                    }}
-                                    disabled={imageSolveBusy || imageSolveCountdown !== null || pollingSolveCountdown !== null}
-                                >Polling</button>
                                 <button
                                     className={`image-solve-source-btn ${imageSolveUploadMode ? 'active' : ''}`}
                                     onClick={() => {
                                         setImageSolveUploadMode(true);
-                                        setPollingSolveMode(false);
-                                        setPollingSolveEnabled(false);
-                                        resetPollingBaseline();
                                         clearImageSolveResult();
                                     }}
-                                    disabled={imageSolveBusy || imageSolveCountdown !== null || pollingSolveCountdown !== null}
+                                    disabled={imageSolveBusy || imageSolveCountdown !== null}
                                 >Upload</button>
                             </div>
 
-                            <div className="provider-priority-toggle">
-                                <span className="provider-priority-label">First response</span>
-                                <div className="provider-priority-actions" role="radiogroup" aria-label="First response provider">
-                                    <label className="provider-priority-option">
-                                        <input
-                                            type="radio"
-                                            name="image-solve-primary-provider"
-                                            className="provider-priority-input"
-                                            value="chatgpt"
-                                            checked={imageSolvePrimaryProvider === "chatgpt"}
-                                            onChange={() => handleImageSolvePrimaryProviderChange("chatgpt")}
-                                            disabled={imageSolveSelectorLocked}
-                                        />
-                                        <span className={`provider-priority-choice ${imageSolvePrimaryProvider === "chatgpt" ? "selected" : ""}`}>
-                                            ChatGPT
-                                        </span>
-                                    </label>
-                                    <label className="provider-priority-option">
-                                        <input
-                                            type="radio"
-                                            name="image-solve-primary-provider"
-                                            className="provider-priority-input"
-                                            value="gemini"
-                                            checked={imageSolvePrimaryProvider === "gemini"}
-                                            onChange={() => handleImageSolvePrimaryProviderChange("gemini")}
-                                            disabled={imageSolveSelectorLocked}
-                                        />
-                                        <span className={`provider-priority-choice ${imageSolvePrimaryProvider === "gemini" ? "selected" : ""}`}>
-                                            Gemini
-                                        </span>
-                                    </label>
+                            {/* ── Provider Setup ── */}
+                            <div className="provider-setup">
+                                <div className="provider-setup-label">Providers <span className="provider-setup-hint">(drag to reorder · check to enable)</span></div>
+                                <div className="provider-list">
+                                    {imageSolveProviderOrder.map((providerId, index) => {
+                                        const providerInfo = ALL_SOLVE_PROVIDERS.find(p => p.id === providerId);
+                                        const isEnabled = imageSolveProviderEnabled[providerId] ?? false;
+                                        const enabledIdx = enabledProviders.indexOf(providerId);
+
+                                        return (
+                                            <div
+                                                key={providerId}
+                                                className={`provider-list-item${providerDragOver === index ? ' drag-over' : ''}${!isEnabled ? ' disabled-provider' : ''}`}
+                                                draggable={!imageSolveSelectorLocked}
+                                                onDragStart={() => handleProviderDragStart(index)}
+                                                onDragOver={(e) => { e.preventDefault(); setProviderDragOver(index); }}
+                                                onDragEnd={() => { setProviderDragOver(null); providerDragIndexRef.current = null; }}
+                                                onDrop={() => handleProviderDrop(index)}
+                                            >
+                                                <span className="provider-drag-handle" title="Drag to reorder">⠿</span>
+                                                <input
+                                                    type="checkbox"
+                                                    id={`provider-chk-${providerId}`}
+                                                    checked={isEnabled}
+                                                    onChange={(e) => {
+                                                        setImageSolveProviderEnabled(prev => ({
+                                                            ...prev,
+                                                            [providerId]: e.target.checked,
+                                                        }));
+                                                    }}
+                                                    disabled={imageSolveSelectorLocked}
+                                                />
+                                                <label
+                                                    htmlFor={`provider-chk-${providerId}`}
+                                                    className="provider-list-label"
+                                                >
+                                                    {providerInfo?.label ?? providerId}
+                                                </label>
+                                                {isEnabled && enabledIdx >= 0 && (
+                                                    <span className={`provider-priority-badge${enabledIdx === 1 ? ' backup' : ''}`}>
+                                                        {enabledIdx === 0 ? 'Primary' : 'Backup'}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
                                 </div>
+                                {enabledProviders.length === 0 && (
+                                    <p className="provider-setup-warning">⚠ Enable at least one provider to solve.</p>
+                                )}
                             </div>
 
                             {imageSolveUploadMode ? (
@@ -2444,7 +1500,7 @@ export default function ScannerApp() {
                                     <button
                                         className={`capture-btn image-solve-btn ${imageSolveBusy ? 'counting' : ''}`}
                                         onClick={() => { if (uploadedImageBase64) solveWithUploadedImage(uploadedImageBase64); }}
-                                        disabled={imageSolveBusy || !uploadedImageBase64}
+                                        disabled={imageSolveBusy || !uploadedImageBase64 || enabledProviders.length === 0}
                                     >
                                         <div className="capture-inner"></div>
                                     </button>
@@ -2458,144 +1514,12 @@ export default function ScannerApp() {
                                         {imageSolveStatus === 'idle' && uploadedImageBase64 && 'Tap the button to send image'}
                                     </p>
                                 </>
-                            ) : pollingSolveMode ? (
-                                <>
-                                    <div className="polling-solve-panel">
-                                        <div className="polling-solve-header">
-                                            <div>
-                                                <div className="polling-solve-title">Polling Image Solve</div>
-                                                <div className={`polling-solve-detection ${pollingDetection.detected ? "detected" : ""}`}>
-                                                    {pollingSolveCountdown !== null
-                                                        ? `Sheet found. Capturing in ${pollingSolveCountdown}s...`
-                                                        : pollingDetectionLabel}
-                                                </div>
-                                            </div>
-                                            <button
-                                                className={`image-solve-source-btn ${pollingSolveEnabled ? "active" : ""}`}
-                                                onClick={() => {
-                                                    setPollingSolveEnabled((enabled) => {
-                                                        pollingDetectionPausedRef.current = false;
-                                                        pollingConfidenceSamplesRef.current = [];
-                                                        pollingConfidenceWindowStartRef.current = null;
-                                                        setPollingSolveCountdown(null);
-                                                        return !enabled;
-                                                    });
-                                                }}
-                                                disabled={isPollingSolveActive}
-                                            >
-                                                {pollingSolveEnabled ? "Pause" : "Start"}
-                                            </button>
-                                            <button
-                                                className="image-solve-source-btn"
-                                                onClick={resetPollingBaseline}
-                                                disabled={isPollingSolveActive}
-                                            >
-                                                Reset Detector
-                                            </button>
-                                        </div>
-
-                                        <div className="polling-solve-metrics">
-                                            <span>Detector {documentDetectorStatus}</span>
-                                            <span>Instant {Math.round(pollingDetection.modelConfidence * 100)}%</span>
-                                            <span>Mean {Math.round(pollingDetection.modelMeanConfidence * 100)}%</span>
-                                            <span>Stable {Math.round(pollingDetection.modelGateProgress * 100)}%</span>
-                                            <span>Label {pollingDetection.modelLabel || "-"}</span>
-                                            <span>Threshold {Math.round(documentDetectorConfidenceThreshold * 100)}%</span>
-                                        </div>
-
-                                        <div className="delay-slider-container">
-                                            <label className="delay-label">
-                                                Polling Capture Delay: <span>{pollingSolveDelay}s</span>
-                                            </label>
-                                            <input
-                                                type="range"
-                                                min="1"
-                                                max="20"
-                                                value={pollingSolveDelay}
-                                                onChange={(e) => setPollingSolveDelay(parseInt(e.target.value))}
-                                                className="delay-slider"
-                                                disabled={pollingSolveCountdown !== null || isPollingSolveActive}
-                                            />
-                                        </div>
-
-                                        <p className="instruction-text" style={{ marginTop: '0.5rem', marginBottom: '1rem' }}>
-                                            {isPollingSolveActive && `Sending polling capture to ${imageSolvePrimaryLabel}...`}
-                                            {!isPollingSolveActive && pollingSolveCountdown === null && pollingSolveEnabled && documentDetectorStatus === "missing" && `Add ${documentDetectorModelPath} to enable YOLO sheet detection.`}
-                                            {!isPollingSolveActive && pollingSolveCountdown === null && pollingSolveEnabled && documentDetectorStatus === "loading" && 'Loading sheet detector...'}
-                                            {!isPollingSolveActive && pollingSolveCountdown === null && pollingSolveEnabled && documentDetectorStatus === "error" && (documentDetectorError || 'Sheet detector failed to load.')}
-                                            {!isPollingSolveActive && pollingSolveCountdown === null && pollingSolveEnabled && documentDetectorStatus === "ready" && 'Hold a sheet until mean confidence stays above 50% for 2 seconds.'}
-                                            {!isPollingSolveActive && pollingSolveCountdown === null && !pollingSolveEnabled && 'Start polling to automatically detect a sheet.'}
-                                        </p>
-                                    </div>
-
-                                    <div className="polling-results-panel">
-                                        <div className="polling-results-header">
-                                            <span>Polling Solve Stack ({pollingSolveResults.length})</span>
-                                            {pollingSolveResults.length > 0 && (
-                                                <button className="delete-btn" onClick={clearPollingSolveStack}>
-                                                    Clear
-                                                </button>
-                                            )}
-                                        </div>
-                                        {!isPollingResultsLoaded && (
-                                            <div className="polling-results-empty">Loading saved polling results...</div>
-                                        )}
-                                        {isPollingResultsLoaded && pollingSolveResults.length === 0 && (
-                                            <div className="polling-results-empty">No polling solves yet.</div>
-                                        )}
-                                        {pollingSolveResults.map((item) => {
-                                            const itemProviderLabel = getProviderLabel(item.answerProvider || item.primaryProvider);
-                                            return (
-                                                <div className={`polling-result-card ${item.status}`} key={item.id}>
-                                                    <button
-                                                        className="polling-result-image"
-                                                        onClick={() => item.image && setExpandedSolverScreenshot({ src: item.image, label: "Polling Request Image" })}
-                                                        disabled={!item.image}
-                                                    >
-                                                        {item.image ? <img src={item.image} alt="Polling request" /> : <span>No image</span>}
-                                                    </button>
-                                                    <div className="polling-result-content">
-                                                        <div className="polling-result-meta">
-                                                            <span>{new Date(item.createdAt).toLocaleTimeString()}</span>
-                                                            <span>{item.status}</span>
-                                                            <span>{itemProviderLabel}</span>
-                                                        </div>
-                                                        {item.error && <div className="polling-result-error">{item.error}</div>}
-                                                        {item.browserError && <div className="polling-result-warning">{item.browserError}</div>}
-                                                        {item.answer && <div className="polling-result-answer">{item.answer}</div>}
-                                                        {item.screenshot && (
-                                                            <button
-                                                                className="polling-result-link"
-                                                                onClick={() => setExpandedSolverScreenshot({ src: item.screenshot!, label: `${itemProviderLabel} Screenshot` })}
-                                                            >
-                                                                Open primary screenshot
-                                                            </button>
-                                                        )}
-                                                        {(item.backupStatus === "queued" || item.backupStatus === "solving") && (
-                                                            <div className="polling-result-warning">{getProviderLabel(item.backupProvider)} backup running...</div>
-                                                        )}
-                                                        {item.backupScreenshot && (
-                                                            <button
-                                                                className="polling-result-link"
-                                                                onClick={() => setExpandedSolverScreenshot({ src: item.backupScreenshot!, label: `${getProviderLabel(item.backupProvider)} Backup Screenshot` })}
-                                                            >
-                                                                Open backup screenshot
-                                                            </button>
-                                                        )}
-                                                        {item.backupAnswer && <div className="polling-result-answer">{item.backupAnswer}</div>}
-                                                        {item.backupError && <div className="polling-result-error">{item.backupError}</div>}
-                                                    </div>
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                </>
                             ) : (
                                 <>
                                     <button
                                         className={`capture-btn image-solve-btn ${imageSolveBusy || imageSolveCountdown !== null ? 'counting' : ''}`}
                                         onClick={startImageSolve}
-                                        disabled={imageSolveBusy || imageSolveCountdown !== null}
+                                        disabled={imageSolveBusy || imageSolveCountdown !== null || enabledProviders.length === 0}
                                     >
                                         <div className="capture-inner"></div>
                                     </button>
@@ -2632,14 +1556,31 @@ export default function ScannerApp() {
                                 <div className="image-solve-result">
                                     <div className="image-solve-result-header">
                                         <span>{imageSolveProviderLabel} Result</span>
-                                        <button
-                                            className="delete-btn"
-                                            onClick={clearImageSolveResult}
-                                        >✕</button>
+                                        <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                                            {canRetry && (
+                                                <button
+                                                    className="retry-btn"
+                                                    onClick={handleRetry}
+                                                    disabled={imageSolveBusy}
+                                                    title="Retry with same image"
+                                                >
+                                                    ↺ Retry
+                                                </button>
+                                            )}
+                                            <button
+                                                className="delete-btn"
+                                                onClick={clearImageSolveResult}
+                                            >✕</button>
+                                        </div>
                                     </div>
                                     {imageSolveAnswer && (
                                         <div className="image-solve-result-body">
                                             {imageSolveAnswer}
+                                        </div>
+                                    )}
+                                    {imageSolveError && !imageSolveAnswer && (
+                                        <div className="image-solve-result-body" style={{ color: 'hsl(var(--accent-danger))' }}>
+                                            {imageSolveError}
                                         </div>
                                     )}
                                     {imageSolveScreenshot && (
@@ -2685,73 +1626,85 @@ export default function ScannerApp() {
                                 </div>
                             )}
 
-                            {!pollingSolveMode && (
-                                <div className="polling-results-panel image-solve-history-panel">
-                                    <div className="polling-results-header">
-                                        <span>Image Solve Stack ({imageSolveResults.length})</span>
-                                        {imageSolveResults.length > 0 && (
-                                            <button className="delete-btn" onClick={clearImageSolveStack}>
-                                                Clear
-                                            </button>
-                                        )}
-                                    </div>
-                                    {!isImageSolveResultsLoaded && (
-                                        <div className="polling-results-empty">Loading saved image solves...</div>
+                            {/* Image Solve History Stack */}
+                            <div className="polling-results-panel image-solve-history-panel">
+                                <div className="polling-results-header">
+                                    <span>Image Solve Stack ({imageSolveResults.length})</span>
+                                    {imageSolveResults.length > 0 && (
+                                        <button className="delete-btn" onClick={clearImageSolveStack}>
+                                            Clear
+                                        </button>
                                     )}
-                                    {isImageSolveResultsLoaded && imageSolveResults.length === 0 && (
-                                        <div className="polling-results-empty">No image solves yet.</div>
-                                    )}
-                                    {imageSolveResults.map((item) => {
-                                        const itemProviderLabel = getProviderLabel(item.answerProvider || item.primaryProvider);
-                                        return (
-                                            <div className={`polling-result-card ${item.status}`} key={item.id}>
-                                                <button
-                                                    className="polling-result-image"
-                                                    onClick={() => item.image && setExpandedSolverScreenshot({ src: item.image, label: "Image Solve Request" })}
-                                                    disabled={!item.image}
-                                                >
-                                                    {item.image ? <img src={item.image} alt="Image solve request" /> : <span>No image</span>}
-                                                </button>
-                                                <div className="polling-result-content">
-                                                    <div className="polling-result-meta">
-                                                        <span>{new Date(item.createdAt).toLocaleTimeString()}</span>
-                                                        <span>{item.source}</span>
-                                                        <span>{item.status}</span>
-                                                        <span>{itemProviderLabel}</span>
-                                                    </div>
-                                                    {item.error && <div className="polling-result-error">{item.error}</div>}
-                                                    {item.browserError && <div className="polling-result-warning">{item.browserError}</div>}
-                                                    {item.answer && <div className="polling-result-answer">{item.answer}</div>}
-                                                    {item.screenshot && (
-                                                        <button
-                                                            className="polling-result-link"
-                                                            onClick={() => setExpandedSolverScreenshot({ src: item.screenshot!, label: `${itemProviderLabel} Screenshot` })}
-                                                        >
-                                                            Open primary screenshot
-                                                        </button>
-                                                    )}
-                                                    {(item.backupStatus === "queued" || item.backupStatus === "solving") && (
-                                                        <div className="polling-result-warning">{getProviderLabel(item.backupProvider)} backup running...</div>
-                                                    )}
-                                                    {item.backupScreenshot && (
-                                                        <button
-                                                            className="polling-result-link"
-                                                            onClick={() => setExpandedSolverScreenshot({ src: item.backupScreenshot!, label: `${getProviderLabel(item.backupProvider)} Backup Screenshot` })}
-                                                        >
-                                                            Open backup screenshot
-                                                        </button>
-                                                    )}
-                                                    {item.backupAnswer && <div className="polling-result-answer">{item.backupAnswer}</div>}
-                                                    {item.backupError && <div className="polling-result-error">{item.backupError}</div>}
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
                                 </div>
-                            )}
+                                {!isImageSolveResultsLoaded && (
+                                    <div className="polling-results-empty">Loading saved image solves...</div>
+                                )}
+                                {isImageSolveResultsLoaded && imageSolveResults.length === 0 && (
+                                    <div className="polling-results-empty">No image solves yet.</div>
+                                )}
+                                {imageSolveResults.map((item) => {
+                                    const itemProviderLabel = getProviderLabel(item.answerProvider || item.primaryProvider);
+                                    return (
+                                        <div className={`polling-result-card ${item.status}`} key={item.id}>
+                                            <button
+                                                className="polling-result-image"
+                                                onClick={() => item.image && setExpandedSolverScreenshot({ src: item.image, label: "Image Solve Request" })}
+                                                disabled={!item.image}
+                                            >
+                                                {item.image ? <img src={item.image} alt="Image solve request" /> : <span>No image</span>}
+                                            </button>
+                                            <div className="polling-result-content">
+                                                <div className="polling-result-meta">
+                                                    <span>{new Date(item.createdAt).toLocaleTimeString()}</span>
+                                                    <span>{item.source}</span>
+                                                    <span>{item.status}</span>
+                                                    <span>{itemProviderLabel}</span>
+                                                </div>
+                                                {item.error && <div className="polling-result-error">{item.error}</div>}
+                                                {item.browserError && <div className="polling-result-warning">{item.browserError}</div>}
+                                                {item.answer && <div className="polling-result-answer">{item.answer}</div>}
+                                                {item.screenshot && (
+                                                    <button
+                                                        className="polling-result-link"
+                                                        onClick={() => setExpandedSolverScreenshot({ src: item.screenshot!, label: `${itemProviderLabel} Screenshot` })}
+                                                    >
+                                                        Open primary screenshot
+                                                    </button>
+                                                )}
+                                                {(item.backupStatus === "queued" || item.backupStatus === "solving") && (
+                                                    <div className="polling-result-warning">{getProviderLabel(item.backupProvider)} backup running...</div>
+                                                )}
+                                                {item.backupScreenshot && (
+                                                    <button
+                                                        className="polling-result-link"
+                                                        onClick={() => setExpandedSolverScreenshot({ src: item.backupScreenshot!, label: `${getProviderLabel(item.backupProvider)} Backup Screenshot` })}
+                                                    >
+                                                        Open backup screenshot
+                                                    </button>
+                                                )}
+                                                {item.backupAnswer && <div className="polling-result-answer">{item.backupAnswer}</div>}
+                                                {item.backupError && <div className="polling-result-error">{item.backupError}</div>}
+                                                {/* Retry button for each history item */}
+                                                {item.image && item.status !== "solving" && (
+                                                    <button
+                                                        className="retry-btn"
+                                                        style={{ marginTop: '0.5rem' }}
+                                                        onClick={() => handleRetryItem(item)}
+                                                        disabled={imageSolveBusy}
+                                                        title="Retry this solve"
+                                                    >
+                                                        ↺ Retry
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
                         </>
                     )}
 
+                    {/* Screenshot expanded overlay */}
                     {expandedSolverScreenshot && (
                         <div className="solver-screenshot-overlay" onClick={() => setExpandedSolverScreenshot(null)}>
                             <div className="solver-screenshot-expanded" onClick={(e) => e.stopPropagation()}>
@@ -2886,9 +1839,7 @@ export default function ScannerApp() {
                                     key={q.id || idx}
                                     className={`question-card ${selectedQuestionIds.has(q.id) ? 'selected' : ''}`}
                                     onClick={() => handleCardClick(q.id, !!q.solution)}
-                                    // Pointer events for long tap detection
                                     onPointerDown={(e) => {
-                                        // Ignore pointer down if clicking the checkbox/buttons directly
                                         if ((e.target as HTMLElement).tagName.toLowerCase() !== 'input' && editingId !== q.id) {
                                             handlePointerDown(q);
                                         }
@@ -2934,9 +1885,7 @@ export default function ScannerApp() {
                                             </div>
                                         </div>
                                     ) : (
-                                        <div className="question-body">
-                                            {q.text}
-                                        </div>
+                                        <div className="question-body">{q.text}</div>
                                     )}
 
                                     {(q.solution || q.isSolving) && !editingId && (
@@ -2965,7 +1914,6 @@ export default function ScannerApp() {
                     )}
                 </div>
             </div>
-            <canvas ref={pollingDetectionCanvasRef} hidden />
         </div>
     );
 }
