@@ -241,8 +241,12 @@ export default function ScannerApp() {
         const storedOrder = localStorage.getItem("scannerApp_imageSolveProviderOrder");
         if (storedOrder) {
             try {
-                const parsed = JSON.parse(storedOrder);
-                if (Array.isArray(parsed) && parsed.length > 0) setImageSolveProviderOrder(parsed);
+                let parsed = JSON.parse(storedOrder);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    // Migrate legacy "chatgpt" saved in localStorage to "deepseek"
+                    parsed = parsed.map(p => p === "chatgpt" ? "deepseek" : p);
+                    setImageSolveProviderOrder(parsed);
+                }
             } catch { /* ignore */ }
         }
 
@@ -250,7 +254,14 @@ export default function ScannerApp() {
         if (storedEnabled) {
             try {
                 const parsed = JSON.parse(storedEnabled);
-                if (parsed && typeof parsed === "object") setImageSolveProviderEnabled(parsed);
+                if (parsed && typeof parsed === "object") {
+                    // Migrate legacy "chatgpt" key to "deepseek"
+                    if ("chatgpt" in parsed) {
+                        parsed.deepseek = parsed.chatgpt;
+                        delete parsed.chatgpt;
+                    }
+                    setImageSolveProviderEnabled(parsed);
+                }
             } catch { /* ignore */ }
         }
 
