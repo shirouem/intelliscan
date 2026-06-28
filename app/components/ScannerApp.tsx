@@ -846,7 +846,7 @@ export default function ScannerApp() {
     }, [imageSolveStatus, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, fetchHistory]);
 
     // ── Image Solve: solve from image (upload or retry) ───────────────────────
-    const solveWithUploadedImage = useCallback(async (base64Image: string, promptOverride?: string, flipClipboard: boolean = false) => {
+    const solveWithUploadedImage = useCallback(async (base64Image: string, promptOverride?: string, flipClipboard: boolean = false, providerOverride?: string) => {
         if (imageSolveStatus === "solving" || imageSolveStatus === "capturing") return;
 
         const runId = imageSolveRunIdRef.current + 1;
@@ -866,10 +866,17 @@ export default function ScannerApp() {
         setImageSolveBrowserError(null);
         setImageSolveAnswerProvider(null);
 
-        // Derive providers from the ordered+enabled list
-        const enabledProviders = imageSolveProviderOrder.filter(p => imageSolveProviderEnabled[p]);
-        const requestPrimaryProvider = (enabledProviders[0] ?? "deepseek") as ImageSolveProvider;
-        const requestBackupProvider = (enabledProviders[1] ?? null) as ImageSolveProvider | null;
+        // If a specific provider override is given, use it as primary with no backup
+        let requestPrimaryProvider: ImageSolveProvider;
+        let requestBackupProvider: ImageSolveProvider | null;
+        if (providerOverride) {
+            requestPrimaryProvider = providerOverride as ImageSolveProvider;
+            requestBackupProvider = null;
+        } else {
+            const enabledProviders = imageSolveProviderOrder.filter(p => imageSolveProviderEnabled[p]);
+            requestPrimaryProvider = (enabledProviders[0] ?? "deepseek") as ImageSolveProvider;
+            requestBackupProvider = (enabledProviders[1] ?? null) as ImageSolveProvider | null;
+        }
         setImageSolveBackupProvider(requestBackupProvider);
 
         // Store for retry
@@ -998,11 +1005,11 @@ export default function ScannerApp() {
         setTimeout(() => solveWithUploadedImage(img, prompt, lastSolvedFlipClipboard), 0);
     }, [lastSolvedImageBase64, lastSolvedPrompt, lastSolvedFlipClipboard, customSolvePrompt, clearImageSolveResult, solveWithUploadedImage]);
 
-    // ── Retry from history card ───────────────────────────────────────────────
-    const handleRetryItem = useCallback((item: StoredImageSolveItem) => {
+    // ── Retry from history card with specific provider ─────────────────────────
+    const handleRetryItemWithProvider = useCallback((item: StoredImageSolveItem, provider: string) => {
         if (!item.image) return;
         clearImageSolveResult();
-        setTimeout(() => solveWithUploadedImage(item.image!, item.prompt ?? undefined, item.flipClipboard ?? true), 0);
+        setTimeout(() => solveWithUploadedImage(item.image!, item.prompt ?? undefined, item.flipClipboard ?? true, provider), 0);
     }, [clearImageSolveResult, solveWithUploadedImage]);
 
     const handleDeleteItem = useCallback(async (jobId: string) => {
@@ -1016,6 +1023,20 @@ export default function ScannerApp() {
             }
         } catch (err) {
             alert("Error deleting record.");
+        }
+    }, []);
+
+    const clearAllImageSolves = useCallback(async () => {
+        if (!window.confirm("Are you sure you want to permanently delete ALL records?")) return;
+        try {
+            const res = await fetch(`/api/image-solve/all`, { method: 'DELETE' });
+            if (res.ok) {
+                setImageSolveResults([]);
+            } else {
+                alert("Failed to clear records.");
+            }
+        } catch (err) {
+            alert("Error clearing records.");
         }
     }, []);
 
@@ -1683,6 +1704,11 @@ export default function ScannerApp() {
                             <button className="reset-btn danger" onClick={clearAllQuestions}>Clear All</button>
                         )}
                     </div>}
+                    {bottomTab === "imagesolve" && <div style={{ display: "flex", gap: "0.5rem" }}>
+                        {imageSolveResults.length > 0 && (
+                            <button className="reset-btn danger" onClick={clearAllImageSolves}>Clear All</button>
+                        )}
+                    </div>}
                 </div>
 
                 {bottomTab === "imagesolve" && (
@@ -1729,12 +1755,21 @@ export default function ScannerApp() {
                                             <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
                                                 <button
                                                     className="retry-btn"
-                                                    onClick={() => handleRetryItem(item)}
+                                                    onClick={() => handleRetryItemWithProvider(item, 'deepseek')}
                                                     disabled={imageSolveBusy}
-                                                    title="Retry this solve"
+                                                    title="Retry with DeepSeek"
                                                     style={{ flex: 1 }}
                                                 >
-                                                    ↺ Retry
+                                                    ↺ DeepSeek
+                                                </button>
+                                                <button
+                                                    className="retry-btn"
+                                                    onClick={() => handleRetryItemWithProvider(item, 'gemini')}
+                                                    disabled={imageSolveBusy}
+                                                    title="Retry with Gemini"
+                                                    style={{ flex: 1 }}
+                                                >
+                                                    ↺ Gemini
                                                 </button>
                                                 <button
                                                     className="delete-btn"
