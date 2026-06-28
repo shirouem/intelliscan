@@ -325,6 +325,7 @@ export default function ScannerApp() {
                             primaryProvider: job.provider,
                             answerProvider: job.primaryScreenshot ? job.provider : (job.backupScreenshot ? job.backupProvider : null),
                             status: job.status,
+                            flipClipboard: job.flipClipboard,
                             createdAt: job.createdAt || new Date().toISOString(),
                         };
                     });
@@ -1009,7 +1010,7 @@ export default function ScannerApp() {
     const handleRetryItemWithProvider = useCallback((item: StoredImageSolveItem, provider: string) => {
         if (!item.image) return;
         clearImageSolveResult();
-        setTimeout(() => solveWithUploadedImage(item.image!, item.prompt ?? undefined, item.flipClipboard ?? true, provider), 0);
+        setTimeout(() => solveWithUploadedImage(item.image!, item.prompt ?? undefined, item.flipClipboard ?? false, provider), 0);
     }, [clearImageSolveResult, solveWithUploadedImage]);
 
     const handleDeleteItem = useCallback(async (jobId: string) => {
