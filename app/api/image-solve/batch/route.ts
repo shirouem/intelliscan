@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 export async function POST(req: NextRequest) {
     try {
         const body = await req.json();
-        const { images, prompt, primaryProvider, backupProvider } = body;
+        const { images, prompt, primaryProvider, backupProvider, flipClipboard } = body;
 
         if (!Array.isArray(images) || images.length === 0) {
             return NextResponse.json({ error: "Missing or invalid images array parameter" }, { status: 400 });
@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
         const res = await fetch(`${browserServiceUrl}/image-solve/batch`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ images, prompt, primaryProvider, backupProvider }),
+            body: JSON.stringify({ images, prompt, primaryProvider, backupProvider, flipClipboard }),
         });
 
         if (!res.ok) {

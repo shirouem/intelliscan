@@ -5,6 +5,7 @@ type ImageSolveBody = {
     prompt?: string;
     primaryProvider?: string;
     backupProvider?: string | null;
+    flipClipboard?: boolean;
 };
 
 type BrowserSolveResponse = {
@@ -40,7 +41,7 @@ export const maxDuration = 300;
 export async function POST(req: NextRequest) {
     try {
         const body = await req.json() as ImageSolveBody;
-        const { image, prompt } = body;
+        const { image, prompt, flipClipboard } = body;
         const primaryProvider = normalizeProviderName(body.primaryProvider);
         const backupProvider = body.backupProvider === undefined ? null : body.backupProvider;
 
@@ -59,7 +60,7 @@ export async function POST(req: NextRequest) {
             const browserRes = await fetch(`${browserServiceUrl}/image-solve`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ image, prompt: solvePrompt, primaryProvider, backupProvider }),
+                body: JSON.stringify({ image, prompt: solvePrompt, primaryProvider, backupProvider, flipClipboard }),
                 signal: AbortSignal.timeout(295_000),
             });
 

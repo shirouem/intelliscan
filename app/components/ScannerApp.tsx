@@ -52,6 +52,7 @@ type StoredImageSolveItem = {
     backupError?: string | null;
     browserError?: string | null;
     error?: string | null;
+    flipClipboard?: boolean;
 };
 
 type CaptureFrameOptions = {
@@ -196,6 +197,28 @@ export default function ScannerApp() {
     const [uploadedImagePreviews, setUploadedImagePreviews] = useState<string[]>([]);
     const [uploadedImagesBase64, setUploadedImagesBase64] = useState<string[]>([]);
 
+    // ── File upload ───────────────────────────────────────────────────────────
+    const handleFilesUpload = useCallback(async (files: FileList | File[]) => {
+        const imageFiles = Array.from(files).filter(f => f.type.startsWith("image/"));
+        if (!imageFiles.length) return;
+
+        const readPromises = imageFiles.map(file => {
+            return new Promise<string>((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target?.result as string);
+                reader.readAsDataURL(file);
+            });
+        });
+
+        const dataUrls = await Promise.all(readPromises);
+        const validUrls = dataUrls.filter(Boolean) as string[];
+        if (!validUrls.length) return;
+
+        setUploadedImagePreviews(validUrls);
+        setUploadedImagesBase64(validUrls);
+        clearImageSolveResult();
+    }, []);
+
     // ── Provider setup: ordered checklist ─────────────────────────────────────
     const [imageSolveProviderOrder, setImageSolveProviderOrder] = useState<string[]>(["deepseek", "gemini"]);
     const [imageSolveProviderEnabled, setImageSolveProviderEnabled] = useState<Record<string, boolean>>({ deepseek: true, gemini: true });
@@ -204,6 +227,7 @@ export default function ScannerApp() {
     // ── Retry ─────────────────────────────────────────────────────────────────
     const [lastSolvedImageBase64, setLastSolvedImageBase64] = useState<string | null>(null);
     const [lastSolvedPrompt, setLastSolvedPrompt] = useState<string | null>(null);
+    const [lastSolvedFlipClipboard, setLastSolvedFlipClipboard] = useState<boolean>(true);
 
     // ── Image solve results stack ─────────────────────────────────────────────
     const [imageSolveResults, setImageSolveResults] = useState<StoredImageSolveItem[]>([]);
@@ -643,6 +667,7 @@ export default function ScannerApp() {
         // Store for retry
         setLastSolvedImageBase64(base64Image);
         setLastSolvedPrompt(customSolvePrompt);
+        setLastSolvedFlipClipboard(true);
 
         setImageSolveStatus("solving");
 
@@ -655,6 +680,7 @@ export default function ScannerApp() {
                     prompt: customSolvePrompt,
                     primaryProvider: requestPrimaryProvider,
                     backupProvider: requestBackupProvider,
+                    flipClipboard: true,
                 }),
             });
 
@@ -798,6 +824,7 @@ export default function ScannerApp() {
                     prompt: customSolvePrompt,
                     primaryProvider: requestPrimaryProvider,
                     backupProvider: requestBackupProvider,
+                    flipClipboard: false,
                 }),
             });
 
@@ -819,7 +846,7 @@ export default function ScannerApp() {
     }, [imageSolveStatus, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, fetchHistory]);
 
     // ── Image Solve: solve from image (upload or retry) ───────────────────────
-    const solveWithUploadedImage = useCallback(async (base64Image: string, promptOverride?: string) => {
+    const solveWithUploadedImage = useCallback(async (base64Image: string, promptOverride?: string, flipClipboard: boolean = false) => {
         if (imageSolveStatus === "solving" || imageSolveStatus === "capturing") return;
 
         const runId = imageSolveRunIdRef.current + 1;
@@ -848,6 +875,7 @@ export default function ScannerApp() {
         // Store for retry
         setLastSolvedImageBase64(base64Image);
         setLastSolvedPrompt(solvePrompt);
+        setLastSolvedFlipClipboard(flipClipboard);
 
         // Global polling will pick up the new job automatically, so we don't upsert locally.
 
@@ -860,6 +888,7 @@ export default function ScannerApp() {
                     prompt: solvePrompt,
                     primaryProvider: requestPrimaryProvider,
                     backupProvider: requestBackupProvider,
+                    flipClipboard,
                 }),
             });
 
@@ -966,14 +995,14 @@ export default function ScannerApp() {
         if (!img) return;
         clearImageSolveResult();
         // Allow state reset to flush, then start the new solve
-        setTimeout(() => solveWithUploadedImage(img, prompt), 0);
-    }, [lastSolvedImageBase64, lastSolvedPrompt, customSolvePrompt, clearImageSolveResult, solveWithUploadedImage]);
+        setTimeout(() => solveWithUploadedImage(img, prompt, lastSolvedFlipClipboard), 0);
+    }, [lastSolvedImageBase64, lastSolvedPrompt, lastSolvedFlipClipboard, customSolvePrompt, clearImageSolveResult, solveWithUploadedImage]);
 
     // ── Retry from history card ───────────────────────────────────────────────
     const handleRetryItem = useCallback((item: StoredImageSolveItem) => {
         if (!item.image) return;
         clearImageSolveResult();
-        setTimeout(() => solveWithUploadedImage(item.image, item.prompt), 0);
+        setTimeout(() => solveWithUploadedImage(item.image!, item.prompt ?? undefined, item.flipClipboard ?? true), 0);
     }, [clearImageSolveResult, solveWithUploadedImage]);
 
     const handleDeleteItem = useCallback(async (jobId: string) => {
@@ -989,28 +1018,6 @@ export default function ScannerApp() {
             alert("Error deleting record.");
         }
     }, []);
-
-    // ── File upload ───────────────────────────────────────────────────────────
-    const handleFilesUpload = useCallback(async (files: FileList | File[]) => {
-        const imageFiles = Array.from(files).filter(f => f.type.startsWith("image/"));
-        if (!imageFiles.length) return;
-
-        const readPromises = imageFiles.map(file => {
-            return new Promise<string>((resolve) => {
-                const reader = new FileReader();
-                reader.onload = (e) => resolve(e.target?.result as string);
-                reader.readAsDataURL(file);
-            });
-        });
-
-        const dataUrls = await Promise.all(readPromises);
-        const validUrls = dataUrls.filter(Boolean) as string[];
-        if (!validUrls.length) return;
-
-        setUploadedImagePreviews(validUrls);
-        setUploadedImagesBase64(validUrls);
-        clearImageSolveResult();
-    }, [clearImageSolveResult]);
 
     // ── Countdown for image solve ─────────────────────────────────────────────
     const startImageSolve = () => {
