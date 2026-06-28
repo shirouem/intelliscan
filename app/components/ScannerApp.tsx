@@ -193,8 +193,8 @@ export default function ScannerApp() {
     const [imageSolveCountdown, setImageSolveCountdown] = useState<number | null>(null);
     const [expandedSolverScreenshot, setExpandedSolverScreenshot] = useState<{ src: string; label: string } | null>(null);
     const [imageSolveUploadMode, setImageSolveUploadMode] = useState(false);
-    const [uploadedImagePreview, setUploadedImagePreview] = useState<string | null>(null);
-    const [uploadedImageBase64, setUploadedImageBase64] = useState<string | null>(null);
+    const [uploadedImagePreviews, setUploadedImagePreviews] = useState<string[]>([]);
+    const [uploadedImagesBase64, setUploadedImagesBase64] = useState<string[]>([]);
 
     // ── Provider setup: ordered checklist ─────────────────────────────────────
     const [imageSolveProviderOrder, setImageSolveProviderOrder] = useState<string[]>(["deepseek", "gemini"]);
@@ -769,6 +769,55 @@ export default function ScannerApp() {
         }
     }, [imageSolveStatus, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, captureHighQualityFrame]);
 
+    // ── Image Solve: solve batch from images ──────────────────────────────────
+    const solveBatchUploadedImages = useCallback(async (base64Images: string[]) => {
+        if (imageSolveStatus === "solving" || imageSolveStatus === "capturing" || base64Images.length === 0) return;
+
+        setImageSolveStatus("solving");
+        setImageSolveAnswer(null);
+        setImageSolveScreenshot(null);
+        setImageSolveBackupAnswer(null);
+        setImageSolveBackupScreenshot(null);
+        setImageSolveBackupStatus("idle");
+        setImageSolveBackupError(null);
+        setImageSolveError(null);
+        setImageSolveBrowserError(null);
+        setImageSolveAnswerProvider(null);
+
+        const enabledProviders = imageSolveProviderOrder.filter(p => imageSolveProviderEnabled[p]);
+        const requestPrimaryProvider = (enabledProviders[0] ?? "deepseek") as ImageSolveProvider;
+        const requestBackupProvider = (enabledProviders[1] ?? null) as ImageSolveProvider | null;
+        setImageSolveBackupProvider(requestBackupProvider);
+
+        try {
+            const response = await fetch("/api/image-solve/batch", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    images: base64Images,
+                    prompt: customSolvePrompt,
+                    primaryProvider: requestPrimaryProvider,
+                    backupProvider: requestBackupProvider,
+                }),
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => null);
+                throw new Error(errorData?.error || `HTTP error! status: ${response.status}`);
+            }
+            
+            fetchHistory();
+            
+            setImageSolveStatus("idle");
+            setUploadedImagesBase64([]);
+            setUploadedImagePreviews([]);
+        } catch (error: unknown) {
+            console.error("Batch image solve error:", error);
+            setImageSolveStatus("error");
+            setImageSolveError(`Failed to queue batch solve: ${getErrorMessage(error)}`);
+        }
+    }, [imageSolveStatus, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, fetchHistory]);
+
     // ── Image Solve: solve from image (upload or retry) ───────────────────────
     const solveWithUploadedImage = useCallback(async (base64Image: string, promptOverride?: string) => {
         if (imageSolveStatus === "solving" || imageSolveStatus === "capturing") return;
@@ -942,17 +991,25 @@ export default function ScannerApp() {
     }, []);
 
     // ── File upload ───────────────────────────────────────────────────────────
-    const handleFileUpload = useCallback((file: File) => {
-        if (!file.type.startsWith("image/")) return;
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            const dataUrl = e.target?.result as string;
-            if (!dataUrl) return;
-            setUploadedImagePreview(dataUrl);
-            setUploadedImageBase64(dataUrl);
-            clearImageSolveResult();
-        };
-        reader.readAsDataURL(file);
+    const handleFilesUpload = useCallback(async (files: FileList | File[]) => {
+        const imageFiles = Array.from(files).filter(f => f.type.startsWith("image/"));
+        if (!imageFiles.length) return;
+
+        const readPromises = imageFiles.map(file => {
+            return new Promise<string>((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(e.target?.result as string);
+                reader.readAsDataURL(file);
+            });
+        });
+
+        const dataUrls = await Promise.all(readPromises);
+        const validUrls = dataUrls.filter(Boolean) as string[];
+        if (!validUrls.length) return;
+
+        setUploadedImagePreviews(validUrls);
+        setUploadedImagesBase64(validUrls);
+        clearImageSolveResult();
     }, [clearImageSolveResult]);
 
     // ── Countdown for image solve ─────────────────────────────────────────────
@@ -1362,39 +1419,47 @@ export default function ScannerApp() {
                                     <input
                                         ref={fileInputRef}
                                         type="file"
+                                        multiple
                                         accept="image/*"
                                         className="image-upload-file-input"
                                         disabled={imageSolveBusy}
                                         onChange={(e) => {
-                                            const file = e.target.files?.[0];
-                                            if (file) handleFileUpload(file);
+                                            const files = e.target.files;
+                                            if (files) handleFilesUpload(files);
                                             e.target.value = '';
                                         }}
                                     />
                                     <div
-                                        className={`image-upload-zone ${uploadedImagePreview ? 'has-preview' : ''} ${imageSolveBusy ? 'disabled' : ''}`}
+                                        className={`image-upload-zone ${uploadedImagePreviews.length > 0 ? 'has-preview' : ''} ${imageSolveBusy ? 'disabled' : ''}`}
                                         onClick={() => !imageSolveBusy && fileInputRef.current?.click()}
                                         onDragOver={(e) => e.preventDefault()}
                                         onDrop={(e) => {
                                             e.preventDefault();
-                                            const file = e.dataTransfer.files?.[0];
-                                            if (file) handleFileUpload(file);
+                                            const files = e.dataTransfer.files;
+                                            if (files) handleFilesUpload(files);
                                         }}
                                     >
-                                        {uploadedImagePreview ? (
-                                            <img src={uploadedImagePreview} alt="Uploaded preview" className="image-upload-preview" />
+                                        {uploadedImagePreviews.length > 0 ? (
+                                            uploadedImagePreviews.length === 1 ? (
+                                                <img src={uploadedImagePreviews[0]} alt="Uploaded preview" className="image-upload-preview" />
+                                            ) : (
+                                                <div className="image-upload-batch-preview">
+                                                    <span className="batch-count" style={{ fontSize: '24px', fontWeight: 'bold' }}>{uploadedImagePreviews.length} images ready</span>
+                                                    <span className="batch-hint" style={{ display: 'block', marginTop: '10px' }}>Tap to re-select</span>
+                                                </div>
+                                            )
                                         ) : (
                                             <div className="image-upload-placeholder">
                                                 <span className="image-upload-icon">📷</span>
-                                                <span className="image-upload-hint">Tap to choose image</span>
+                                                <span className="image-upload-hint">Tap to choose image(s)</span>
                                                 <span className="image-upload-hint-sub">or drag &amp; drop</span>
                                             </div>
                                         )}
                                     </div>
                                     <button
                                         className={`capture-btn image-solve-btn ${imageSolveBusy ? 'counting' : ''}`}
-                                        onClick={() => { if (uploadedImageBase64) solveWithUploadedImage(uploadedImageBase64); }}
-                                        disabled={imageSolveBusy || !uploadedImageBase64 || enabledProviders.length === 0}
+                                        onClick={() => { if (uploadedImagesBase64.length > 0) solveBatchUploadedImages(uploadedImagesBase64); }}
+                                        disabled={imageSolveBusy || uploadedImagesBase64.length === 0 || enabledProviders.length === 0}
                                     >
                                         <div className="capture-inner"></div>
                                     </button>
@@ -1404,8 +1469,8 @@ export default function ScannerApp() {
                                         {imageSolveStatus === 'done' && imageSolveBackupStatus !== 'queued' && imageSolveBackupStatus !== 'solving' && 'Result received!'}
                                         {imageSolveStatus === 'done' && (imageSolveBackupStatus === 'queued' || imageSolveBackupStatus === 'solving') && `${imageSolvePrimaryLabel} screenshot received. Waiting for ${imageSolveBackupLabel} backup...`}
                                         {imageSolveStatus === 'error' && '❌ ' + imageSolveError}
-                                        {imageSolveStatus === 'idle' && !uploadedImageBase64 && 'Choose an image to solve'}
-                                        {imageSolveStatus === 'idle' && uploadedImageBase64 && 'Tap the button to send image'}
+                                        {imageSolveStatus === 'idle' && uploadedImagesBase64.length === 0 && 'Choose image(s) to solve'}
+                                        {imageSolveStatus === 'idle' && uploadedImagesBase64.length > 0 && `Tap the button to send ${uploadedImagesBase64.length > 1 ? 'batch' : 'image'}`}
                                     </p>
                                 </>
                             ) : (
