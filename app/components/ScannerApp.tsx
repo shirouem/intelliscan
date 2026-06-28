@@ -1006,10 +1006,28 @@ export default function ScannerApp() {
     }, [lastSolvedImageBase64, lastSolvedPrompt, lastSolvedFlipClipboard, customSolvePrompt, clearImageSolveResult, solveWithUploadedImage]);
 
     // ── Retry from history card with specific provider ─────────────────────────
-    const handleRetryItemWithProvider = useCallback((item: StoredImageSolveItem, provider: string) => {
+    const handleRetryItemWithProvider = useCallback(async (item: StoredImageSolveItem, provider: string) => {
         if (!item.image) return;
+        
+        let base64Image = item.image;
+        if (item.image.startsWith('/')) {
+            try {
+                const response = await fetch(item.image);
+                const blob = await response.blob();
+                base64Image = await new Promise<string>((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result as string);
+                    reader.onerror = reject;
+                    reader.readAsDataURL(blob);
+                });
+            } catch (err) {
+                alert("Failed to load image for retry.");
+                return;
+            }
+        }
+
         clearImageSolveResult();
-        setTimeout(() => solveWithUploadedImage(item.image!, item.prompt ?? undefined, item.flipClipboard ?? true, provider), 0);
+        solveWithUploadedImage(base64Image, item.prompt ?? undefined, item.flipClipboard ?? true, provider);
     }, [clearImageSolveResult, solveWithUploadedImage]);
 
     const handleDeleteItem = useCallback(async (jobId: string) => {
