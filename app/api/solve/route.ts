@@ -100,13 +100,15 @@ export async function POST(req: NextRequest) {
 
         try {
             let cleanedText = rawText.trim();
-            if (cleanedText.startsWith("\`\`\`json")) {
-                cleanedText = cleanedText.slice(7);
-            } else if (cleanedText.startsWith("\`\`\`")) {
-                cleanedText = cleanedText.slice(3);
-            }
-            if (cleanedText.endsWith("\`\`\`")) {
-                cleanedText = cleanedText.slice(0, -3);
+            const match = cleanedText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+            if (match) {
+                cleanedText = match[1];
+            } else {
+                const firstBrace = cleanedText.indexOf('{');
+                const lastBrace = cleanedText.lastIndexOf('}');
+                if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+                    cleanedText = cleanedText.substring(firstBrace, lastBrace + 1);
+                }
             }
             cleanedText = cleanedText.trim();
 
