@@ -99,7 +99,18 @@ export async function POST(req: NextRequest) {
         }
 
         try {
-            const parsedSolutions = JSON.parse(rawText);
+            let cleanedText = rawText.trim();
+            if (cleanedText.startsWith("\`\`\`json")) {
+                cleanedText = cleanedText.slice(7);
+            } else if (cleanedText.startsWith("\`\`\`")) {
+                cleanedText = cleanedText.slice(3);
+            }
+            if (cleanedText.endsWith("\`\`\`")) {
+                cleanedText = cleanedText.slice(0, -3);
+            }
+            cleanedText = cleanedText.trim();
+
+            const parsedSolutions = JSON.parse(cleanedText);
             return NextResponse.json({ solutions: parsedSolutions });
         } catch (jsonError) {
             console.error("Failed to parse AI solution output:", rawText);
