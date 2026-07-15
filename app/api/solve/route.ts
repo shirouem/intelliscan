@@ -5,7 +5,7 @@ if (typeof (globalThis as any).geminiKeyIndex === "undefined") {
     (globalThis as any).geminiKeyIndex = 0;
 }
 
-export const maxDuration = 60;
+export const maxDuration = 300; // 5 minutes
 
 export async function POST(req: NextRequest) {
     const rawKeys = process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || "";
