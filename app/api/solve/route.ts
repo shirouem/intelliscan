@@ -5,16 +5,14 @@ if (typeof (globalThis as any).geminiKeyIndex === "undefined") {
     (globalThis as any).geminiKeyIndex = 0;
 }
 
-export const maxDuration = 60; // 60 seconds (Vercel max for many plans)
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
     const rawKeys = process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || "";
     const apiKeys = rawKeys.split(",").map(k => k.trim()).filter(Boolean);
 
     if (apiKeys.length === 0) {
-        return NextResponse.json({
-            error: "GEMINI_API_KEYS is not set. Please add it to your .env.local file."
-        }, { status: 500 });
+        return NextResponse.json({ error: "GEMINI_API_KEYS is not set." }, { status: 500 });
     }
 
     try {
@@ -31,13 +29,14 @@ export async function POST(req: NextRequest) {
 
         const prompt = `${systemPrompt}
         
-        Return your answer as a raw strict JSON object ONLY. 
-        The keys of the JSON object must correspond to the exact 'id' of each provided question, and the value should be the string containing your detailed solution.
-        Do not wrap the text in markdown blocks (e.g. \`\`\`json). Just return the raw JSON braces.
+Return ONLY a valid JSON object. 
+The keys of the JSON object must correspond to the exact 'id' of each provided question.
+The value for each key must be the string containing your detailed solution.
+DO NOT wrap the text in markdown blocks (e.g. \`\`\`json). Just return the raw JSON object.
 
-        Here are the questions:
-        ${JSON.stringify(questions, null, 2)}
-        `;
+Here are the questions:
+${JSON.stringify(questions, null, 2)}
+`;
 
         const modelsToTry = [
             "gemini-3.5-flash",
@@ -47,20 +46,15 @@ export async function POST(req: NextRequest) {
         ];
 
         let rawText = null;
-        let lastError = null;
         let success = false;
-        const maxKeyAttempts = apiKeys.length;
 
-        for (let keyAttempt = 0; keyAttempt < maxKeyAttempts; keyAttempt++) {
+        for (let keyAttempt = 0; keyAttempt < apiKeys.length; keyAttempt++) {
             const currentKeyIndex = (globalThis as any).geminiKeyIndex;
             const currentApiKey = apiKeys[currentKeyIndex];
             const ai = new GoogleGenAI({ apiKey: currentApiKey });
 
-            console.log(`[Solve API] Using API Key at Index: ${currentKeyIndex}`);
-
             for (const modelName of modelsToTry) {
                 try {
-                    console.log(`  Attempting solution generation with model: ${modelName}`);
                     const response = await ai.models.generateContent({
                         model: modelName,
                         contents: [prompt],
@@ -70,49 +64,32 @@ export async function POST(req: NextRequest) {
                         }
                     });
 
-                    rawText = response.text;
-                    if (rawText) {
-                        console.log(`  Successfully generated solutions using ${modelName}`);
+                    if (response.text) {
+                        rawText = response.text;
                         success = true;
                         break;
                     }
                 } catch (error: any) {
-                    console.warn(`  Model ${modelName} failed:`, error.message);
-                    lastError = error;
+                    console.warn(`Model ${modelName} failed:`, error.message);
                 }
             }
 
             if (success) {
                 break;
             } else {
-                console.warn(`All models failed for API Key index ${currentKeyIndex}. Switching to next key.`);
                 (globalThis as any).geminiKeyIndex = (currentKeyIndex + 1) % apiKeys.length;
             }
         }
 
         if (!success || !rawText) {
-            console.error("All models and keys failed. Last error:", lastError);
-            return NextResponse.json(
-                { error: `All models and keys failed to solve questions. Last error: ${lastError?.message || 'Unknown error'}` },
-                { status: 500 }
-            );
+            return NextResponse.json({ error: "All models failed to solve questions." }, { status: 500 });
         }
 
         try {
-            let cleanedText = rawText.trim();
-            const match = cleanedText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-            if (match) {
-                cleanedText = match[1];
-            } else {
-                const firstBrace = cleanedText.indexOf('{');
-                const lastBrace = cleanedText.lastIndexOf('}');
-                if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-                    cleanedText = cleanedText.substring(firstBrace, lastBrace + 1);
-                }
-            }
-            cleanedText = cleanedText.trim();
-
-            const parsedSolutions = JSON.parse(cleanedText);
+            // NO FANCY PARSING: Just string replace the markdown backticks if they are there
+            const cleanText = rawText.replace(/```json/gi, "").replace(/```/g, "").trim();
+            const parsedSolutions = JSON.parse(cleanText);
+            
             return NextResponse.json({ solutions: parsedSolutions });
         } catch (jsonError) {
             console.error("Failed to parse AI solution output:", rawText);
@@ -121,9 +98,6 @@ export async function POST(req: NextRequest) {
 
     } catch (error: any) {
         console.error("Solve API Error:", error);
-        return NextResponse.json(
-            { error: error.message || "An error occurred while solving the questions." },
-            { status: 500 }
-        );
+        return NextResponse.json({ error: error.message || "An error occurred." }, { status: 500 });
     }
 }
