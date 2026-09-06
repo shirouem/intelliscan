@@ -10,6 +10,10 @@ interface ScannedQuestion {
     text: string;
     solution?: string;
     isSolving?: boolean;
+    transcript?: string;
+    audioDataUrl?: string | null;
+    questionIntro?: string;
+    isTranscribing?: boolean;
 }
 
 type ImageSolveProvider = "deepseek" | "gemini";
@@ -140,7 +144,209 @@ const readImageSolveResponse = async (response: Response): Promise<ImageSolveSta
     }
 };
 
-// ─── DB code removed for global history ────────────────────────────────────────
+// ─── Sound Effects (WAV Data URI + Web Audio API Dual Pipeline) ───────────────
+const createWavDataUri = (sampleRate: number, generateSample: (t: number, dur: number) => number, durationSec: number): string => {
+    const numSamples = Math.floor(sampleRate * durationSec);
+    const headerSize = 44;
+    const totalSize = headerSize + numSamples;
+    const buffer = new Uint8Array(totalSize);
+
+    const writeString = (offset: number, str: string) => {
+        for (let i = 0; i < str.length; i++) buffer[offset + i] = str.charCodeAt(i);
+    };
+    const writeUint32 = (offset: number, val: number) => {
+        buffer[offset] = val & 0xff;
+        buffer[offset + 1] = (val >> 8) & 0xff;
+        buffer[offset + 2] = (val >> 16) & 0xff;
+        buffer[offset + 3] = (val >> 24) & 0xff;
+    };
+    const writeUint16 = (offset: number, val: number) => {
+        buffer[offset] = val & 0xff;
+        buffer[offset + 1] = (val >> 8) & 0xff;
+    };
+
+    writeString(0, "RIFF");
+    writeUint32(4, 36 + numSamples);
+    writeString(8, "WAVE");
+    writeString(12, "fmt ");
+    writeUint32(16, 16); // Subchunk1Size
+    writeUint16(20, 1);  // AudioFormat (PCM)
+    writeUint16(22, 1);  // NumChannels (1 mono)
+    writeUint32(24, sampleRate);
+    writeUint32(28, sampleRate); // ByteRate (sampleRate * 1 * 1)
+    writeUint16(32, 1);  // BlockAlign
+    writeUint16(34, 8);  // BitsPerSample
+    writeString(36, "data");
+    writeUint32(40, numSamples);
+
+    for (let i = 0; i < numSamples; i++) {
+        const t = i / sampleRate;
+        const val = generateSample(t, durationSec);
+        buffer[44 + i] = Math.max(0, Math.min(255, Math.round((val + 1) * 127.5)));
+    }
+
+    let binary = "";
+    const len = buffer.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(buffer[i]);
+    }
+    return `data:audio/wav;base64,${btoa(binary)}`;
+};
+
+let boopAudioElement: HTMLAudioElement | null = null;
+let cancelAudioElement: HTMLAudioElement | null = null;
+let sharedAudioCtx: AudioContext | null = null;
+
+const getSharedAudioContext = () => {
+    if (typeof window === "undefined") return null;
+    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtx) return null;
+    if (!sharedAudioCtx || sharedAudioCtx.state === "closed") {
+        sharedAudioCtx = new AudioCtx();
+    }
+    if (sharedAudioCtx.state === "suspended") {
+        sharedAudioCtx.resume().catch(() => {});
+    }
+    return sharedAudioCtx;
+};
+
+const getBoopAudio = () => {
+    if (typeof window === "undefined") return null;
+    if (!boopAudioElement) {
+        try {
+            const uri = createWavDataUri(22050, (t, dur) => {
+                const freq = 520 + (960 - 520) * (t / dur);
+                const env = Math.max(0, 1 - t / dur);
+                return Math.sin(2 * Math.PI * freq * t) * env * 0.95;
+            }, 0.18);
+            boopAudioElement = new Audio(uri);
+            boopAudioElement.volume = 0.85;
+        } catch { }
+    }
+    return boopAudioElement;
+};
+
+const getCancelAudio = () => {
+    if (typeof window === "undefined") return null;
+    if (!cancelAudioElement) {
+        try {
+            const uri = createWavDataUri(22050, (t, dur) => {
+                if (t < 0.1) {
+                    const freq = 380 - (380 - 260) * (t / 0.1);
+                    const env = 1 - t / 0.1;
+                    return Math.sin(2 * Math.PI * freq * t) * env * 0.8;
+                } else {
+                    const t2 = t - 0.1;
+                    const dur2 = dur - 0.1;
+                    const freq = 240 - (240 - 130) * (t2 / dur2);
+                    const env = 1 - t2 / dur2;
+                    return Math.sin(2 * Math.PI * freq * t2) * env * 0.9;
+                }
+            }, 0.28);
+            cancelAudioElement = new Audio(uri);
+            cancelAudioElement.volume = 0.85;
+        } catch { }
+    }
+    return cancelAudioElement;
+};
+
+const playBoopSound = () => {
+    if (typeof window === "undefined") return;
+
+    // 1. Play via HTML5 Audio
+    try {
+        const audio = getBoopAudio();
+        if (audio) {
+            audio.currentTime = 0;
+            audio.play().catch(() => {});
+        }
+    } catch {}
+
+    // 2. Play via Web Audio API
+    try {
+        const ctx = getSharedAudioContext();
+        if (ctx) {
+            const synth = () => {
+                const now = ctx.currentTime;
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = "sine";
+                osc.frequency.setValueAtTime(520, now);
+                osc.frequency.exponentialRampToValueAtTime(960, now + 0.08);
+                gain.gain.setValueAtTime(0.4, now);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start(now);
+                osc.stop(now + 0.18);
+            };
+
+            if (ctx.state === "suspended") {
+                ctx.resume().then(synth).catch(() => {});
+            } else {
+                synth();
+            }
+        }
+    } catch (e) {
+        console.warn("Could not play boop sound:", e);
+    }
+};
+
+const playCancelSound = () => {
+    if (typeof window === "undefined") return;
+
+    // 1. Play via HTML5 Audio
+    try {
+        const audio = getCancelAudio();
+        if (audio) {
+            audio.currentTime = 0;
+            audio.play().catch(() => {});
+        }
+    } catch {}
+
+    // 2. Play via Web Audio API
+    try {
+        const ctx = getSharedAudioContext();
+        if (ctx) {
+            const synth = () => {
+                const now = ctx.currentTime;
+                // Tone 1: 380Hz -> 260Hz
+                const osc1 = ctx.createOscillator();
+                const gain1 = ctx.createGain();
+                osc1.type = "triangle";
+                osc1.frequency.setValueAtTime(380, now);
+                osc1.frequency.exponentialRampToValueAtTime(260, now + 0.1);
+                gain1.gain.setValueAtTime(0.35, now);
+                gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+                osc1.connect(gain1);
+                gain1.connect(ctx.destination);
+                osc1.start(now);
+                osc1.stop(now + 0.12);
+
+                // Tone 2: 240Hz -> 130Hz
+                const osc2 = ctx.createOscillator();
+                const gain2 = ctx.createGain();
+                osc2.type = "triangle";
+                osc2.frequency.setValueAtTime(240, now + 0.09);
+                osc2.frequency.exponentialRampToValueAtTime(130, now + 0.28);
+                gain2.gain.setValueAtTime(0.35, now + 0.09);
+                gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+                osc2.connect(gain2);
+                gain2.connect(ctx.destination);
+                osc2.start(now + 0.09);
+                osc2.stop(now + 0.3);
+            };
+
+            if (ctx.state === "suspended") {
+                ctx.resume().then(synth).catch(() => {});
+            } else {
+                synth();
+            }
+        }
+    } catch (e) {
+        console.warn("Could not play cancel sound:", e);
+    }
+};
 
 // ─── Component ───────────────────────────────────────────────────────────────
 export default function ScannerApp() {
@@ -152,6 +358,10 @@ export default function ScannerApp() {
     const imageSolveRunIdRef = useRef(0);
     const cameraRunIdRef = useRef(0);
     const providerDragIndexRef = useRef<number | null>(null);
+    const pollingCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const darknessStartTimeRef = useRef<number | null>(null);
+    const abortedDueToLongDarknessRef = useRef<boolean>(false);
+    const countdownTriggeredByDarknessRef = useRef<boolean>(false);
 
     // ── Scan mode ─────────────────────────────────────────────────────────────
     const [isCapturing, setIsCapturing] = useState(false);
@@ -175,7 +385,19 @@ export default function ScannerApp() {
     const [scanStatus, setScanStatus] = useState<"idle" | "scanning" | "success" | "error">("idle");
     const [errorMessage, setErrorMessage] = useState("");
     const [countdown, setCountdown] = useState<number | null>(null);
-    const [captureDelay, setCaptureDelay] = useState(6);
+    const [captureDelay, setCaptureDelay] = useState(10);
+    const [darknessDuration, setDarknessDuration] = useState<number>(0);
+    const [darknessStatus, setDarknessStatus] = useState<"idle" | "covering" | "countdown" | "aborted">("idle");
+    const [darknessAbortMessage, setDarknessAbortMessage] = useState<string | null>(null);
+
+    // ── Spoken Audio Playback & Looping ───────────────────────────────────────
+    const [activeAudioIndex, setActiveAudioIndex] = useState<number | null>(null);
+    const [isAudioPlaying, setIsAudioPlaying] = useState<boolean>(false);
+    const [audioStatusMessage, setAudioStatusMessage] = useState<string | null>(null);
+    const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+    const speechUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+    const isLoopingRef = useRef<boolean>(true);
+    const audioDataCacheRef = useRef<Map<string, { audioDataUrl?: string | null; transcript: string; spokenText: string; questionIntro?: string }>>(new Map());
 
     // ── Image Solve mode ──────────────────────────────────────────────────────
     const [imageSolveMode, setImageSolveMode] = useState(false);
@@ -289,8 +511,26 @@ export default function ScannerApp() {
             } catch { /* ignore */ }
         }
 
+        // Warm up and unlock audio context on first user interaction
+        const unlockAudio = () => {
+            getSharedAudioContext();
+            getBoopAudio();
+            getCancelAudio();
+        };
+        window.addEventListener("pointerdown", unlockAudio, { once: true });
+        window.addEventListener("click", unlockAudio, { once: true });
+        window.addEventListener("touchstart", unlockAudio, { once: true });
+        window.addEventListener("keydown", unlockAudio, { once: true });
+
         setIsLoaded(true);
         setMounted(true);
+
+        return () => {
+            window.removeEventListener("pointerdown", unlockAudio);
+            window.removeEventListener("click", unlockAudio);
+            window.removeEventListener("touchstart", unlockAudio);
+            window.removeEventListener("keydown", unlockAudio);
+        };
     }, []);
 
     // ── Persist state ─────────────────────────────────────────────────────────
@@ -500,6 +740,267 @@ export default function ScannerApp() {
         return { width: video.videoWidth, height: video.videoHeight };
     };
 
+    // ── Spoken Audio Playback Functions ───────────────────────────────────────
+    const stopCurrentAudio = useCallback(() => {
+        if (currentAudioRef.current) {
+            try {
+                currentAudioRef.current.pause();
+                currentAudioRef.current.currentTime = 0;
+            } catch { }
+            currentAudioRef.current = null;
+        }
+        if (typeof window !== "undefined" && "speechSynthesis" in window) {
+            try {
+                window.speechSynthesis.cancel();
+            } catch { }
+        }
+        setIsAudioPlaying(false);
+    }, []);
+
+    const playBrowserSpeechFallback = useCallback((text: string) => {
+        if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+        try {
+            window.speechSynthesis.cancel();
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.rate = 0.95;
+            utterance.onend = () => {
+                if (isLoopingRef.current) {
+                    setTimeout(() => {
+                        try { window.speechSynthesis.speak(utterance); } catch { }
+                    }, 400);
+                }
+            };
+            speechUtteranceRef.current = utterance;
+            window.speechSynthesis.speak(utterance);
+            setIsAudioPlaying(true);
+        } catch (e) {
+            console.warn("Speech synthesis fallback failed:", e);
+        }
+    }, []);
+
+    const prefetchRemainingAudio = useCallback(async (list: ScannedQuestion[], currentIndex: number) => {
+        for (let i = 0; i < list.length; i++) {
+            const nextIdx = (currentIndex + 1 + i) % list.length;
+            if (nextIdx === currentIndex) continue;
+            const q = list[nextIdx];
+            if (!q || !q.solution || audioDataCacheRef.current.has(q.id)) continue;
+
+            try {
+                const res = await fetch("/api/transcribe", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        questionText: q.text,
+                        solutionText: q.solution,
+                        questionNumber: q.questionNumber || String(nextIdx + 1),
+                    }),
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    audioDataCacheRef.current.set(q.id, {
+                        audioDataUrl: data.audioDataUrl,
+                        transcript: data.transcript,
+                        spokenText: data.spokenText,
+                        questionIntro: data.questionIntro,
+                    });
+                    setSavedQuestions(prev => prev.map(sq => sq.id === q.id ? {
+                        ...sq,
+                        transcript: data.transcript,
+                        audioDataUrl: data.audioDataUrl,
+                        questionIntro: data.questionIntro
+                    } : sq));
+                }
+            } catch (e) {
+                console.warn("Background prefetch failed for question:", q.id, e);
+            }
+        }
+    }, []);
+
+    const playQuestionAudio = useCallback(async (index: number, list?: ScannedQuestion[]) => {
+        setSavedQuestions(currentSaved => {
+            const solvedList = list || currentSaved.filter(q => !!q.solution);
+            if (!solvedList || solvedList.length === 0) return currentSaved;
+
+            const boundedIndex = ((index % solvedList.length) + solvedList.length) % solvedList.length;
+            const targetQ = solvedList[boundedIndex];
+            if (!targetQ || !targetQ.solution) return currentSaved;
+
+            setActiveAudioIndex(boundedIndex);
+            stopCurrentAudio();
+
+            setAudioStatusMessage(`Encoding spoken audio for Question ${targetQ.questionNumber || boundedIndex + 1}...`);
+
+            (async () => {
+                try {
+                    let cached = audioDataCacheRef.current.get(targetQ.id);
+                    if (!cached) {
+                        const res = await fetch("/api/transcribe", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                questionText: targetQ.text,
+                                solutionText: targetQ.solution,
+                                questionNumber: targetQ.questionNumber || String(boundedIndex + 1),
+                            }),
+                        });
+
+                        if (!res.ok) {
+                            const errJson = await res.json();
+                            throw new Error(errJson.error || `Transcribe failed: ${res.status}`);
+                        }
+
+                        const data = await res.json();
+                        cached = {
+                            audioDataUrl: data.audioDataUrl,
+                            transcript: data.transcript,
+                            spokenText: data.spokenText,
+                            questionIntro: data.questionIntro,
+                        };
+                        audioDataCacheRef.current.set(targetQ.id, cached);
+
+                        setSavedQuestions(prev => prev.map(q => q.id === targetQ.id ? {
+                            ...q,
+                            transcript: data.transcript,
+                            audioDataUrl: data.audioDataUrl,
+                            questionIntro: data.questionIntro
+                        } : q));
+                    }
+
+                    if (cached.audioDataUrl) {
+                        const audio = new Audio(cached.audioDataUrl);
+                        audio.loop = true;
+                        audio.onplay = () => setIsAudioPlaying(true);
+                        audio.onpause = () => setIsAudioPlaying(false);
+                        audio.onerror = () => {
+                            console.warn("Audio element error. Falling back to browser speech synthesis.");
+                            playBrowserSpeechFallback(cached!.spokenText);
+                        };
+
+                        currentAudioRef.current = audio;
+                        await audio.play();
+                        setIsAudioPlaying(true);
+                        setAudioStatusMessage(`Playing Question ${targetQ.questionNumber || boundedIndex + 1} (Looping)`);
+                    } else {
+                        playBrowserSpeechFallback(cached.spokenText);
+                        setAudioStatusMessage(`Playing Question ${targetQ.questionNumber || boundedIndex + 1} (Browser Speech, Looping)`);
+                    }
+
+                    // Prefetch the remaining questions in background
+                    prefetchRemainingAudio(solvedList, boundedIndex);
+                } catch (err: unknown) {
+                    console.error("Play question audio error:", err);
+                    setAudioStatusMessage("Audio playback failed: " + getErrorMessage(err));
+                }
+            })();
+
+            return currentSaved;
+        });
+    }, [stopCurrentAudio, playBrowserSpeechFallback, prefetchRemainingAudio]);
+
+    const autoSolveAndPlay = useCallback(async (questionsToSolve: ScannedQuestion[]) => {
+        if (!questionsToSolve || questionsToSolve.length === 0) return;
+
+        setIsProcessingSolutions(true);
+        setAudioStatusMessage("Solving scanned questions with AI...");
+
+        try {
+            const payload = questionsToSolve.map(q => ({ id: q.id, text: q.text }));
+            const solveRes = await fetch("/api/solve", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ questions: payload, customSolvePrompt }),
+            });
+
+            if (!solveRes.ok) {
+                const errData = await solveRes.json();
+                throw new Error(errData.error || `Solve failed: ${solveRes.status}`);
+            }
+
+            const solveData = await solveRes.json();
+            const solutionsMap: Record<string, string> = solveData.solutions || {};
+
+            const solvedList: ScannedQuestion[] = [];
+
+            setSavedQuestions(prev => {
+                const updated = prev.map(q => {
+                    const sol = solutionsMap[q.id];
+                    if (sol) {
+                        const solvedItem = { ...q, solution: sol, isSolving: false };
+                        solvedList.push(solvedItem);
+                        return solvedItem;
+                    }
+                    return { ...q, isSolving: false };
+                });
+                return updated;
+            });
+
+            setExpandedSolutionIds(new Set(questionsToSolve.map(q => q.id)));
+
+            if (solvedList.length > 0) {
+                playQuestionAudio(0, solvedList);
+            } else {
+                setAudioStatusMessage("No solutions generated from scan.");
+            }
+        } catch (err: unknown) {
+            console.error("Auto solve failed:", err);
+            setErrorMessage(getErrorMessage(err, "Failed to solve questions."));
+            setAudioStatusMessage("Solving failed: " + getErrorMessage(err));
+            setSavedQuestions(prev => prev.map(q => ({ ...q, isSolving: false })));
+        } finally {
+            setIsProcessingSolutions(false);
+        }
+    }, [customSolvePrompt, playQuestionAudio]);
+
+    const toggleAudioPlayPause = useCallback(() => {
+        if (currentAudioRef.current) {
+            if (currentAudioRef.current.paused) {
+                currentAudioRef.current.play();
+                setIsAudioPlaying(true);
+            } else {
+                currentAudioRef.current.pause();
+                setIsAudioPlaying(false);
+            }
+        } else if (speechUtteranceRef.current && typeof window !== "undefined" && "speechSynthesis" in window) {
+            if (window.speechSynthesis.speaking) {
+                if (window.speechSynthesis.paused) {
+                    window.speechSynthesis.resume();
+                    setIsAudioPlaying(true);
+                } else {
+                    window.speechSynthesis.pause();
+                    setIsAudioPlaying(false);
+                }
+            } else if (activeAudioIndex !== null) {
+                playQuestionAudio(activeAudioIndex);
+            }
+        } else if (activeAudioIndex !== null) {
+            playQuestionAudio(activeAudioIndex);
+        } else {
+            const solved = savedQuestions.filter(q => !!q.solution);
+            if (solved.length > 0) playQuestionAudio(0, solved);
+        }
+    }, [activeAudioIndex, playQuestionAudio, savedQuestions]);
+
+    const cycleNextSolution = useCallback(() => {
+        const solved = savedQuestions.filter(q => !!q.solution);
+        if (solved.length === 0) return;
+        const nextIndex = activeAudioIndex === null ? 0 : (activeAudioIndex + 1) % solved.length;
+        playQuestionAudio(nextIndex, solved);
+    }, [savedQuestions, activeAudioIndex, playQuestionAudio]);
+
+    const cyclePrevSolution = useCallback(() => {
+        const solved = savedQuestions.filter(q => !!q.solution);
+        if (solved.length === 0) return;
+        const prevIndex = activeAudioIndex === null ? 0 : (activeAudioIndex - 1 + solved.length) % solved.length;
+        playQuestionAudio(prevIndex, solved);
+    }, [savedQuestions, activeAudioIndex, playQuestionAudio]);
+
+    // Clean up audio on unmount
+    useEffect(() => {
+        return () => {
+            stopCurrentAudio();
+        };
+    }, [stopCurrentAudio]);
+
     // ── Scan mode capture ─────────────────────────────────────────────────────
     const capture = useCallback(async (autoTriggered = false) => {
         if (!videoRef.current) return;
@@ -539,38 +1040,211 @@ export default function ScannerApp() {
             }
 
             const data = await response.json();
-            const newQuestions: ScannedQuestion[] = data.questions || [];
+            const rawQuestions = data.questions || [];
+            if (rawQuestions.length === 0) {
+                setScanStatus("error");
+                setErrorMessage("No questions detected in the scanned image. Please position the paper and try again.");
+                return;
+            }
 
-            setSavedQuestions(prev => {
-                const updatedList = [...prev];
-                newQuestions.forEach(newQ => {
-                    const getLexicalPrefix = (str: string) => str.replace(/[^a-zA-Z0-9]/g, '').toLowerCase().substring(0, 25);
-                    const newPrefix = getLexicalPrefix(newQ.text || "");
-                    const isSimilar = updatedList.some(existingQ => {
-                        const existingPrefix = getLexicalPrefix(existingQ.text || "");
-                        const minLength = Math.min(newPrefix.length, existingPrefix.length);
-                        if (minLength < 15) {
-                            return newPrefix === existingPrefix && newPrefix.length > 5;
-                        }
-                        return newPrefix.startsWith(existingPrefix) || existingPrefix.startsWith(newPrefix);
-                    });
-                    if (!isSimilar) {
-                        updatedList.push({
-                            ...newQ,
-                            id: `q-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`
-                        });
-                    }
-                });
-                return updatedList;
-            });
+            const assignedQuestions: ScannedQuestion[] = rawQuestions.map((newQ: any, idx: number) => ({
+                id: newQ.id || `q-${Date.now()}-${idx}`,
+                questionNumber: newQ.questionNumber || String(idx + 1),
+                text: newQ.text || "",
+                isSolving: true,
+            }));
 
+            setSavedQuestions(assignedQuestions);
             setScanStatus("success");
+
+            // Automatically solve all questions and start spoken looping playback
+            autoSolveAndPlay(assignedQuestions);
         } catch (error: unknown) {
             console.error("Scan error:", error);
             setScanStatus("error");
             setErrorMessage(getErrorMessage(error, "Failed to process the question paper."));
         }
-    }, [captureHighQualityFrame]);
+    }, [captureHighQualityFrame, autoSolveAndPlay]);
+
+    // ── Frame Darkness Detection ──────────────────────────────────────────────
+    const checkFrameDarkness = useCallback((): { isDark: boolean; avgLuminance: number } => {
+        const video = videoRef.current;
+        if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+            return { isDark: false, avgLuminance: 255 };
+        }
+
+        if (!pollingCanvasRef.current) {
+            pollingCanvasRef.current = document.createElement("canvas");
+            pollingCanvasRef.current.width = 32;
+            pollingCanvasRef.current.height = 32;
+        }
+
+        const canvas = pollingCanvasRef.current;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        if (!ctx) return { isDark: false, avgLuminance: 255 };
+
+        ctx.drawImage(video, 0, 0, 32, 32);
+        const imageData = ctx.getImageData(0, 0, 32, 32);
+        const data = imageData.data;
+        let totalLuminance = 0;
+        let maxLuminance = 0;
+        const pixelCount = data.length / 4;
+
+        for (let i = 0; i < data.length; i += 4) {
+            const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+            totalLuminance += lum;
+            if (lum > maxLuminance) maxLuminance = lum;
+        }
+
+        const avgLuminance = totalLuminance / pixelCount;
+        // Covered camera threshold: average luminance < 15 and max luminance < 35
+        const isDark = avgLuminance < 15 && maxLuminance < 35;
+        return { isDark, avgLuminance };
+    }, []);
+
+    // ── Camera Polling for Complete Darkness (Scan Mode) ──────────────────────
+    useEffect(() => {
+        if (!mounted || imageSolveMode || scanStatus === "scanning" || cameraError) {
+            darknessStartTimeRef.current = null;
+            abortedDueToLongDarknessRef.current = false;
+            countdownTriggeredByDarknessRef.current = false;
+            setDarknessDuration(0);
+            return;
+        }
+
+        const interval = setInterval(() => {
+            const { isDark } = checkFrameDarkness();
+            const now = Date.now();
+
+            const solvedQuestions = savedQuestions.filter(q => !!q.solution);
+            const hasActiveSolutions = solvedQuestions.length > 0;
+
+            if (hasActiveSolutions) {
+                // ── PLAYBACK GESTURE MODE ──────────────────────────────────
+                if (isDark) {
+                    if (darknessStartTimeRef.current === null) {
+                        darknessStartTimeRef.current = now;
+                    }
+
+                    const elapsed = (now - darknessStartTimeRef.current) / 1000;
+                    setDarknessDuration(elapsed);
+
+                    // 10s Continuous Darkness -> RESET
+                    if (elapsed >= 10.0) {
+                        console.log("[Gesture] 10s continuous darkness -> RESET TRIGGERED!");
+                        darknessStartTimeRef.current = null;
+                        setDarknessDuration(0);
+                        abortedDueToLongDarknessRef.current = true; // Wait for uncover
+                        stopCurrentAudio();
+                        setSavedQuestions([]);
+                        setSelectedQuestionIds(new Set());
+                        setActiveAudioIndex(null);
+                        setAudioStatusMessage(null);
+                        audioDataCacheRef.current.clear();
+                        setDarknessStatus("aborted");
+                        setDarknessAbortMessage("RESET complete: All questions cleared. Uncover camera to resume scan polling.");
+                        playCancelSound();
+                        try { if ("vibrate" in navigator) navigator.vibrate([200, 100, 200]); } catch { }
+                        return;
+                    } else if (elapsed >= 4.5 && elapsed <= 7.5) {
+                        setDarknessStatus("covering");
+                        setDarknessAbortMessage("Ready! Release now to cycle to next solution (Refresh)");
+                    } else if (elapsed > 7.5) {
+                        setDarknessStatus("covering");
+                        setDarknessAbortMessage(`Hold until 10s to RESET (${(10 - elapsed).toFixed(1)}s remaining)`);
+                    } else {
+                        setDarknessStatus("covering");
+                        setDarknessAbortMessage(`Covering camera: ${elapsed.toFixed(1)}s (Release at 5s to cycle, hold 10s to reset)`);
+                    }
+                } else {
+                    // Light detected! Camera uncovered.
+                    if (abortedDueToLongDarknessRef.current) {
+                        console.log("[Gesture] Camera uncovered after reset. Ready for scan.");
+                        abortedDueToLongDarknessRef.current = false;
+                        setDarknessStatus("idle");
+                        setDarknessAbortMessage(null);
+                        darknessStartTimeRef.current = null;
+                        setDarknessDuration(0);
+                        return;
+                    }
+
+                    if (darknessStartTimeRef.current !== null) {
+                        const coverDuration = (now - darknessStartTimeRef.current) / 1000;
+                        darknessStartTimeRef.current = null;
+                        setDarknessDuration(0);
+                        setDarknessStatus("idle");
+                        setDarknessAbortMessage(null);
+
+                        // REFRESH: 5s with 1-2s buffer (4.5s to 7.5s)
+                        if (coverDuration >= 4.5 && coverDuration <= 7.5) {
+                            console.log(`[Gesture] Camera uncovered after ${coverDuration.toFixed(1)}s -> REFRESH TRIGGERED!`);
+                            playBoopSound();
+                            try { if ("vibrate" in navigator) navigator.vibrate([100, 50, 100]); } catch { }
+                            const nextIndex = activeAudioIndex === null ? 0 : (activeAudioIndex + 1) % solvedQuestions.length;
+                            playQuestionAudio(nextIndex, solvedQuestions);
+                        } else {
+                            console.log(`[Gesture] Camera uncovered after ${coverDuration.toFixed(1)}s (not within 4.5s - 7.5s buffer)`);
+                        }
+                    } else {
+                        setDarknessStatus("idle");
+                    }
+                }
+                return;
+            }
+
+            // ── IDLE / SCAN MODE (No active solutions) ─────────────────────
+            if (isDark) {
+                // If already aborted at countdown end, do not re-trigger while darkness persists! Wait for light.
+                if (abortedDueToLongDarknessRef.current) {
+                    return;
+                }
+
+                // If countdown is active, camera is currently covered during countdown
+                if (countdown !== null) {
+                    setDarknessDuration(5);
+                    return;
+                }
+
+                if (darknessStartTimeRef.current === null) {
+                    darknessStartTimeRef.current = now;
+                }
+
+                const elapsed = (now - darknessStartTimeRef.current) / 1000;
+                setDarknessDuration(Math.min(elapsed, 5));
+
+                // Trigger scan countdown at the 5.0-second mark of continuous darkness
+                if (elapsed >= 5.0 && !countdownTriggeredByDarknessRef.current && countdown === null) {
+                    console.log("[Darkness Poller] Darkness reached 5s! Initiating countdown.");
+                    countdownTriggeredByDarknessRef.current = true;
+                    setCountdown(captureDelay);
+                    setDarknessStatus("countdown");
+                    setDarknessAbortMessage(null);
+                    playBoopSound();
+                    try { if ("vibrate" in navigator) navigator.vibrate([120, 60, 120]); } catch { }
+                } else if (elapsed < 5.0) {
+                    setDarknessStatus("covering");
+                }
+            } else {
+                // Camera sees light!
+                if (abortedDueToLongDarknessRef.current) {
+                    // Re-arm sensor now that the camera has been uncovered
+                    console.log("[Darkness Poller] Camera uncovered. Sensor re-armed.");
+                    abortedDueToLongDarknessRef.current = false;
+                    setDarknessStatus("idle");
+                    setDarknessAbortMessage(null);
+                }
+
+                darknessStartTimeRef.current = null;
+                setDarknessDuration(0);
+
+                if (countdown === null) {
+                    setDarknessStatus("idle");
+                }
+            }
+        }, 100);
+
+        return () => clearInterval(interval);
+    }, [mounted, imageSolveMode, scanStatus, cameraError, countdown, captureDelay, checkFrameDarkness, savedQuestions, activeAudioIndex, playQuestionAudio, stopCurrentAudio]);
 
     // ── Countdown for scan ────────────────────────────────────────────────────
     useEffect(() => {
@@ -581,13 +1255,42 @@ export default function ScannerApp() {
             return () => clearTimeout(timer);
         } else if (countdown === 0) {
             setCountdown(null);
+            countdownTriggeredByDarknessRef.current = false;
+
+            // Check if by the time countdown ends it is STILL dark
+            const { isDark } = checkFrameDarkness();
+            if (isDark) {
+                console.log("[Countdown End] Camera is STILL dark. Aborting scan.");
+                abortedDueToLongDarknessRef.current = true;
+                setDarknessStatus("aborted");
+                setDarknessAbortMessage("Scan aborted: Camera remained covered when countdown ended. Uncover camera to resume.");
+                playCancelSound();
+                try { if ("vibrate" in navigator) navigator.vibrate([200, 100, 200]); } catch { }
+                return;
+            }
+
+            // Camera is uncovered (light detected): capture document!
+            setDarknessStatus("idle");
+            playBoopSound();
             capture(true);
         }
-    }, [countdown, capture]);
+    }, [countdown, capture, checkFrameDarkness]);
+
+    const cancelScanCountdown = useCallback(() => {
+        setCountdown(null);
+        countdownTriggeredByDarknessRef.current = false;
+        darknessStartTimeRef.current = null;
+        setDarknessDuration(0);
+        setDarknessStatus("idle");
+        playCancelSound();
+    }, []);
 
     const startManualScan = () => {
         if (scanStatus === "scanning" || countdown !== null) return;
+        countdownTriggeredByDarknessRef.current = false;
         setCountdown(captureDelay);
+        setDarknessStatus("countdown");
+        playBoopSound();
     };
 
     // ── Image Solve: shared result apply ──────────────────────────────────────
@@ -1142,8 +1845,12 @@ export default function ScannerApp() {
     };
 
     const clearAllQuestions = () => {
+        stopCurrentAudio();
         setSavedQuestions([]);
         setSelectedQuestionIds(new Set());
+        setActiveAudioIndex(null);
+        setAudioStatusMessage(null);
+        audioDataCacheRef.current.clear();
         setScanStatus("idle");
     };
 
@@ -1293,6 +2000,21 @@ export default function ScannerApp() {
                     {((countdown !== null && countdown > 0) || (imageSolveCountdown !== null && imageSolveCountdown > 0)) && (
                         <div className="countdown-overlay">
                             <span className="countdown-text">{countdown ?? imageSolveCountdown}</span>
+                            {countdown !== null && (
+                                <div className="countdown-subtext">Position paper · Capturing soon</div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Darkness Detection Indicator on Video */}
+                    {!imageSolveMode && darknessDuration > 0 && countdown === null && (
+                        <div className="video-darkness-badge">
+                            <span>🌑 Camera Covered: {darknessDuration.toFixed(1)}s / 5.0s</span>
+                        </div>
+                    )}
+                    {!imageSolveMode && darknessDuration > 0 && countdown !== null && (
+                        <div className="video-darkness-badge">
+                            <span>🌑 Camera Covered — Uncover to capture!</span>
                         </div>
                     )}
 
@@ -1318,7 +2040,7 @@ export default function ScannerApp() {
                             📄 Scan Mode
                         </button>
                         <button
-                            className={`mode-btn ${imageSolveMode ? 'active' : ''}`}
+                            className={`mode-btn archive-mode-btn ${imageSolveMode ? 'active' : ''}`}
                             onClick={() => {
                                 if (imageSolveMode) return;
                                 setImageSolveMode(true);
@@ -1326,32 +2048,117 @@ export default function ScannerApp() {
                                 setBottomTab("imagesolve");
                             }}
                         >
-                            🧠 Image Solve
+                            🧠 Image Solve <span className="archive-pill">Archived</span>
                         </button>
                     </div>
 
                     {!imageSolveMode ? (
-                        <>
-                            <button
-                                className={`capture-btn ${countdown !== null ? 'counting' : ''}`}
-                                onClick={startManualScan}
-                                disabled={scanStatus === "scanning" || countdown !== null}
-                            >
-                                <div className="capture-inner"></div>
-                            </button>
-                            <p className="instruction-text" style={{ marginTop: '0.5rem', marginBottom: '1.5rem' }}>
-                                {countdown !== null
-                                    ? "Position paper. Capturing soon..."
-                                    : `Tap to start ${captureDelay}-second scan timer`}
-                            </p>
+                        <div className="scan-polling-container">
+                            {savedQuestions.some(q => !!q.solution) ? (
+                                <div className={`polling-status-card ${darknessStatus}`}>
+                                    <div className="polling-status-header">
+                                        <span className={`status-indicator-dot ${darknessStatus}`}></span>
+                                        <span className="status-indicator-title">
+                                            {darknessStatus === "covering"
+                                                ? darknessDuration >= 4.5 && darknessDuration <= 7.5
+                                                    ? "Ready! Release to cycle (Refresh)"
+                                                    : darknessDuration > 7.5
+                                                        ? `Hold for 10s to RESET (${(10 - darknessDuration).toFixed(1)}s)`
+                                                        : `Covered (${darknessDuration.toFixed(1)}s / 5.0s)`
+                                                : darknessStatus === "aborted"
+                                                    ? "Reset Complete"
+                                                    : "Audio Playback Gestures Active"}
+                                        </span>
+                                    </div>
+
+                                    {/* Darkness Progress Bar towards 10s */}
+                                    <div className="darkness-meter-wrapper">
+                                        <div
+                                            className={`darkness-meter-bar ${darknessDuration >= 4.5 ? 'full' : ''}`}
+                                            style={{ width: `${Math.min(100, (darknessDuration / 10) * 100)}%` }}
+                                        ></div>
+                                    </div>
+
+                                    <p className="polling-status-desc">
+                                        {darknessAbortMessage || (
+                                            darknessStatus === "covering"
+                                                ? "Release between 5s to cycle to next solution. Hold for 10s to reset all problems."
+                                                : "🖐️ Cover camera for 5s & release to skip to next solution. Cover for 10s to reset."
+                                        )}
+                                    </p>
+                                </div>
+                            ) : (
+                                <div className={`polling-status-card ${darknessStatus} ${countdown !== null ? 'counting' : ''}`}>
+                                    <div className="polling-status-header">
+                                        <span className={`status-indicator-dot ${darknessStatus}`}></span>
+                                        <span className="status-indicator-title">
+                                            {countdown !== null
+                                                ? `Scan Countdown: ${countdown}s`
+                                                : darknessStatus === "covering"
+                                                    ? `Darkness Detected (${darknessDuration.toFixed(1)}s / 5.0s)`
+                                                    : darknessStatus === "aborted"
+                                                        ? "Scan Aborted (Misfire Protection)"
+                                                        : "Continuous Polling Active"}
+                                        </span>
+                                    </div>
+
+                                    {/* Darkness Progress Bar (0 to 5s) */}
+                                    {countdown === null && darknessStatus !== "aborted" && (
+                                        <div className="darkness-meter-wrapper">
+                                            <div
+                                                className={`darkness-meter-bar ${darknessDuration >= 5 ? 'full' : ''}`}
+                                                style={{ width: `${Math.min(100, (darknessDuration / 5) * 100)}%` }}
+                                            ></div>
+                                        </div>
+                                    )}
+
+                                    <p className="polling-status-desc">
+                                        {countdown !== null ? (
+                                            darknessDuration > 0 ? (
+                                                "Camera is still covered! Uncover camera before countdown ends to scan."
+                                            ) : (
+                                                "Position paper in view! Capturing automatically when countdown ends..."
+                                            )
+                                        ) : darknessStatus === "covering" ? (
+                                            "Hold covered for 5 seconds to trigger scan countdown..."
+                                        ) : darknessStatus === "aborted" ? (
+                                            darknessAbortMessage || "Camera remained covered when countdown ended. Uncover camera to resume."
+                                        ) : (
+                                            "Cover camera with hand or object for 5 seconds to trigger scan."
+                                        )}
+                                    </p>
+
+                                    {countdown !== null && (
+                                        <button
+                                            type="button"
+                                            className="cancel-countdown-btn"
+                                            onClick={cancelScanCountdown}
+                                        >
+                                            ✕ Cancel Countdown
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Secondary manual trigger */}
+                            <div className="manual-trigger-row">
+                                <button
+                                    className={`manual-scan-btn ${countdown !== null ? 'counting' : ''}`}
+                                    onClick={startManualScan}
+                                    disabled={scanStatus === "scanning" || countdown !== null}
+                                    title="Manual scan fallback"
+                                >
+                                    {countdown !== null ? `Capturing in ${countdown}s` : "📸 Manual Trigger"}
+                                </button>
+                            </div>
 
                             <div className="delay-slider-container">
                                 <label className="delay-label">
-                                    Capture Delay: <span>{captureDelay}s</span>
+                                    Countdown Timer: <span>{captureDelay}s</span>
                                 </label>
                                 <input
                                     type="range"
-                                    min="1"
+                                    min="3"
                                     max="20"
                                     value={captureDelay}
                                     onChange={(e) => setCaptureDelay(parseInt(e.target.value))}
@@ -1359,9 +2166,17 @@ export default function ScannerApp() {
                                     disabled={scanStatus === "scanning" || countdown !== null}
                                 />
                             </div>
-                        </>
+                        </div>
                     ) : (
                         <>
+                            {/* Archived Feature Banner */}
+                            <div className="archived-feature-banner">
+                                <span className="archived-banner-icon">📦</span>
+                                <div className="archived-banner-text">
+                                    <strong>Archived Feature:</strong> Image Solve has been archived. All functionality, history, and solvers remain intact for historical reference.
+                                </div>
+                            </div>
+
                             {/* Upload / Camera sub-mode toggle */}
                             <div className="image-solve-source-toggle">
                                 <button
@@ -1685,7 +2500,7 @@ export default function ScannerApp() {
                             className={`tab-btn ${bottomTab === "imagesolve" ? "active" : ""}`}
                             onClick={() => { setBottomTab("imagesolve"); fetchHistory(); }}
                         >
-                            Image Solve Stack ({imageSolveResults.length})
+                            Image Solve Stack ({imageSolveResults.length}) <span className="archive-pill tab">Archived</span>
                         </button>
                     </div>
                     {bottomTab === "questions" && <div style={{ display: "flex", gap: "0.5rem" }}>
@@ -1799,6 +2614,80 @@ export default function ScannerApp() {
                         })}
                     </div>
                 )}
+
+                {/* Spoken Audio Playback Banner */}
+                {bottomTab === "questions" && savedQuestions.some(q => !!q.solution) && (() => {
+                    const solvedList = savedQuestions.filter(q => !!q.solution);
+                    const currentIdx = activeAudioIndex !== null ? activeAudioIndex : 0;
+                    const activeQ = solvedList[currentIdx] || solvedList[0];
+
+                    return (
+                        <div className="audio-playback-banner">
+                            <div className="audio-player-header">
+                                <div className="audio-player-title">
+                                    <span className="audio-pulse-icon">{isAudioPlaying ? "🔊" : "🔈"}</span>
+                                    <span>Playing Question {activeQ?.questionNumber || currentIdx + 1} of {solvedList.length}</span>
+                                </div>
+                                <span className="audio-loop-badge">🔁 Looping</span>
+                            </div>
+
+                            {activeQ?.questionIntro && (
+                                <div className="audio-intro-text">
+                                    "{activeQ.questionIntro}"
+                                </div>
+                            )}
+
+                            <div className="audio-player-controls">
+                                <div style={{ display: "flex", gap: "0.4rem" }}>
+                                    <button
+                                        type="button"
+                                        className="audio-ctrl-btn"
+                                        onClick={cyclePrevSolution}
+                                        title="Previous Question"
+                                    >
+                                        ⏮️ Prev
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={`audio-ctrl-btn ${isAudioPlaying ? "primary" : ""}`}
+                                        onClick={toggleAudioPlayPause}
+                                        title={isAudioPlaying ? "Pause audio" : "Play audio"}
+                                    >
+                                        {isAudioPlaying ? "⏸️ Pause" : "▶️ Play"}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="audio-ctrl-btn"
+                                        onClick={cycleNextSolution}
+                                        title="Next Question (Refresh)"
+                                    >
+                                        ⏭️ Next
+                                    </button>
+                                </div>
+
+                                <button
+                                    type="button"
+                                    className="audio-ctrl-btn danger"
+                                    onClick={clearAllQuestions}
+                                    title="Reset all questions and return to scan polling"
+                                >
+                                    🔄 Reset All
+                                </button>
+                            </div>
+
+                            <div className="audio-gesture-guide">
+                                <span>🖐️ <strong>Refresh:</strong> Cover camera 5s & release to cycle</span>
+                                <span>🛑 <strong>Reset:</strong> Cover camera 10s to wipe</span>
+                            </div>
+
+                            {audioStatusMessage && (
+                                <div style={{ fontSize: "0.75rem", color: "hsl(var(--accent-secondary))", opacity: 0.9 }}>
+                                    {audioStatusMessage}
+                                </div>
+                            )}
+                        </div>
+                    );
+                })()}
 
                 {bottomTab === "questions" && savedQuestions.length > 0 && (
                     <div className="tabs-container">
@@ -1923,7 +2812,30 @@ export default function ScannerApp() {
                                                     <span>Generating answer...</span>
                                                 </div>
                                             ) : expandedSolutionIds.has(q.id) && (
-                                                <div className="solution-text">{q.solution}</div>
+                                                <>
+                                                    <div className="solution-text">{q.solution}</div>
+                                                    {q.transcript && (
+                                                        <div className="question-transcript-box">
+                                                            <div className="question-transcript-header">
+                                                                <span>🎙️ Spoken Transcript</span>
+                                                                <button
+                                                                    type="button"
+                                                                    className="audio-ctrl-btn"
+                                                                    style={{ padding: "0.2rem 0.6rem", fontSize: "0.72rem" }}
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        const solvedList = savedQuestions.filter(sq => !!sq.solution);
+                                                                        const targetIdx = solvedList.findIndex(sq => sq.id === q.id);
+                                                                        if (targetIdx >= 0) playQuestionAudio(targetIdx, solvedList);
+                                                                    }}
+                                                                >
+                                                                    🔊 Play
+                                                                </button>
+                                                            </div>
+                                                            <div>{q.transcript}</div>
+                                                        </div>
+                                                    )}
+                                                </>
                                             )}
                                         </div>
                                     )}

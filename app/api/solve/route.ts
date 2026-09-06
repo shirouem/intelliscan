@@ -25,7 +25,16 @@ export async function POST(req: NextRequest) {
 
         const systemPrompt = customSolvePrompt && customSolvePrompt.trim().length > 0
             ? customSolvePrompt
-            : `You are an expert tutor. I am providing you with an array of questions extracted from a question paper.\nPlease solve each question accurately and provide a clear, step-by-step solution.`;
+            : `You are an expert academic tutor and problem solver.
+You are given an array of questions extracted from camera scans of exam or test papers.
+Please carefully solve each question step-by-step and provide a clear, rigorous, and direct final answer.
+
+IMPORTANT GUIDELINES FOR SCAN ARTIFACTS AND MULTIPLE QUESTIONS:
+1. Handle Multiple Questions: Solve every question provided in the input array.
+2. Robustness to Scan Errors: Because the text comes from real-world camera scans, there may be OCR mistranscriptions, missing letters, line cutoffs, or degraded formatting. Use context and domain knowledge (math, physics, chemistry, biology, general science, etc.) to reconstruct and solve the intended question.
+3. Garbled / Corrupted Text: If a question consists of unintelligible gibberish, noise, or severely cutoff text that cannot be reasonably deduced, explicitly state: "Unable to solve: Scan text is incomplete or corrupted."
+4. Format: For each question, provide the direct step-by-step working and final answer cleanly.`;
+
 
         const prompt = `${systemPrompt}
         
@@ -39,9 +48,12 @@ ${JSON.stringify(questions, null, 2)}
 `;
 
         const modelsToTry = [
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
             "gemini-3.5-flash",
             "gemini-3-flash-preview",
-            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash-lite",
             "gemini-2.5-flash"
         ];
 
@@ -89,7 +101,7 @@ ${JSON.stringify(questions, null, 2)}
             // NO FANCY PARSING: Just string replace the markdown backticks if they are there
             const cleanText = rawText.replace(/```json/gi, "").replace(/```/g, "").trim();
             const parsedSolutions = JSON.parse(cleanText);
-            
+
             return NextResponse.json({ solutions: parsedSolutions });
         } catch (jsonError) {
             console.error("Failed to parse AI solution output:", rawText);
