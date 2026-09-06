@@ -348,6 +348,99 @@ const playCancelSound = () => {
     }
 };
 
+const playRefreshArmedSound = () => {
+    if (typeof window === "undefined") return;
+    try {
+        const ctx = getSharedAudioContext();
+        if (ctx) {
+            const synth = () => {
+                const now = ctx.currentTime;
+                // Pleasant rising two-tone chime (D5 -> A5)
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = "sine";
+                osc.frequency.setValueAtTime(587.33, now); // D5
+                osc.frequency.setValueAtTime(880.0, now + 0.08); // A5
+                gain.gain.setValueAtTime(0.35, now);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start(now);
+                osc.stop(now + 0.22);
+            };
+
+            if (ctx.state === "suspended") {
+                ctx.resume().then(synth).catch(() => {});
+            } else {
+                synth();
+            }
+        }
+    } catch (e) {
+        console.warn("Could not play refresh armed sound:", e);
+    }
+};
+
+/**
+ * Resilient solution key matcher that handles any AI formatting:
+ * e.g. "q1", "1", "question1", "Question 1", or positional array index.
+ */
+function findSolutionForQuestion(q: ScannedQuestion, idx: number, solutionsMap: Record<string, any>): string | null {
+    if (!solutionsMap || typeof solutionsMap !== "object") return null;
+
+    // Handle array of solutions
+    if (Array.isArray(solutionsMap)) {
+        if (solutionsMap[idx] && typeof solutionsMap[idx] === "string") {
+            return String(solutionsMap[idx]);
+        }
+        if (solutionsMap[idx] && typeof solutionsMap[idx] === "object" && solutionsMap[idx].solution) {
+            return String(solutionsMap[idx].solution);
+        }
+    }
+
+    // 1. Exact ID match
+    if (solutionsMap[q.id]) return String(solutionsMap[q.id]);
+
+    // 2. Question number match (e.g. "1", "2")
+    const qNum = q.questionNumber || String(idx + 1);
+    if (solutionsMap[qNum]) return String(solutionsMap[qNum]);
+
+    // 3. Normalized key variants: "q1", "q_1", "question1", "question 1"
+    const candidates = [
+        `q${qNum}`,
+        `q_${qNum}`,
+        `q-${qNum}`,
+        `question${qNum}`,
+        `question_${qNum}`,
+        `question ${qNum}`,
+        `Question ${qNum}`,
+        `Question_${qNum}`,
+        qNum,
+        String(idx + 1),
+        String(idx)
+    ];
+    for (const key of candidates) {
+        if (solutionsMap[key]) return String(solutionsMap[key]);
+    }
+
+    // 4. Normalized key match (removing non-alphanumerics)
+    const targetNorm = q.id.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const numNorm = `q${qNum}`.toLowerCase();
+    for (const k of Object.keys(solutionsMap)) {
+        const kNorm = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (kNorm === targetNorm || kNorm === numNorm || kNorm === qNum) {
+            return String(solutionsMap[k]);
+        }
+    }
+
+    // 5. Positional fallback: use by array index if available
+    const values = Object.values(solutionsMap);
+    if (values[idx] && typeof values[idx] === "string") {
+        return String(values[idx]);
+    }
+
+    return null;
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 export default function ScannerApp() {
     // ── Refs ──────────────────────────────────────────────────────────────────
@@ -399,6 +492,15 @@ export default function ScannerApp() {
     const speechUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
     const isLoopingRef = useRef<boolean>(true);
     const audioDataCacheRef = useRef<Map<string, { audioDataUrl?: string | null; transcript: string; spokenText: string; questionIntro?: string }>>(new Map());
+    const audioPlayTokenRef = useRef<number>(0);
+    const isRefreshArmedRef = useRef<boolean>(false);
+    const inFlightTranscribeRef = useRef<Map<string, Promise<any>>>(new Map());
+    const savedQuestionsRef = useRef<ScannedQuestion[]>([]);
+    const activeAudioIndexRef = useRef<number | null>(null);
+    const consecutiveLightTicksRef = useRef<number>(0);
+
+    savedQuestionsRef.current = savedQuestions;
+    activeAudioIndexRef.current = activeAudioIndex;
 
     // ── Image Solve mode ──────────────────────────────────────────────────────
     const [imageSolveMode, setImageSolveMode] = useState(false);
@@ -743,12 +845,16 @@ export default function ScannerApp() {
 
     // ── Spoken Audio Playback Functions ───────────────────────────────────────
     const stopCurrentAudio = useCallback(() => {
+        // Invalidate any active or in-flight transcribe / audio requests
+        audioPlayTokenRef.current += 1;
+
         if (currentAudioRef.current) {
             try {
                 currentAudioRef.current.pause();
                 currentAudioRef.current.currentTime = 0;
+                currentAudioRef.current.removeAttribute("src");
+                currentAudioRef.current.load();
             } catch { }
-            currentAudioRef.current = null;
         }
         if (typeof window !== "undefined" && "speechSynthesis" in window) {
             try {
@@ -810,58 +916,80 @@ export default function ScannerApp() {
             const nextIdx = (currentIndex + 1 + i) % list.length;
             if (nextIdx === currentIndex) continue;
             const q = list[nextIdx];
-            if (!q || !q.solution || audioDataCacheRef.current.has(q.id)) continue;
+            if (!q || !q.solution || audioDataCacheRef.current.has(q.id) || inFlightTranscribeRef.current.has(q.id)) continue;
 
             try {
-                const res = await fetch("/api/transcribe", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        questionText: q.text,
-                        solutionText: q.solution,
-                        questionNumber: q.questionNumber || String(nextIdx + 1),
-                        speed: speechRate,
-                    }),
-                });
-                if (res.ok) {
-                    const data = await res.json();
+                const fetchPromise = (async () => {
+                    const res = await fetch("/api/transcribe", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            questionText: q.text,
+                            solutionText: q.solution,
+                            questionNumber: q.questionNumber || String(nextIdx + 1),
+                            speed: speechRate,
+                        }),
+                    });
+                    if (!res.ok) throw new Error("Prefetch failed");
+                    return await res.json();
+                })();
+
+                inFlightTranscribeRef.current.set(q.id, fetchPromise);
+                const data = await fetchPromise;
+                inFlightTranscribeRef.current.delete(q.id);
+
+                if (data) {
                     audioDataCacheRef.current.set(q.id, {
                         audioDataUrl: data.audioDataUrl,
                         transcript: data.transcript,
                         spokenText: data.spokenText,
                         questionIntro: data.questionIntro,
                     });
-                    setSavedQuestions(prev => prev.map(sq => sq.id === q.id ? {
-                        ...sq,
-                        transcript: data.transcript,
-                        audioDataUrl: data.audioDataUrl,
-                        questionIntro: data.questionIntro
-                    } : sq));
                 }
             } catch (e) {
+                inFlightTranscribeRef.current.delete(q.id);
                 console.warn("Background prefetch failed for question:", q.id, e);
             }
         }
     }, [speechRate]);
 
     const playQuestionAudio = useCallback(async (index: number, list?: ScannedQuestion[]) => {
-        setSavedQuestions(currentSaved => {
-            const solvedList = list || currentSaved.filter(q => !!q.solution);
-            if (!solvedList || solvedList.length === 0) return currentSaved;
+        const currentToken = ++audioPlayTokenRef.current;
 
-            const boundedIndex = ((index % solvedList.length) + solvedList.length) % solvedList.length;
-            const targetQ = solvedList[boundedIndex];
-            if (!targetQ || !targetQ.solution) return currentSaved;
+        const currentList = list || savedQuestionsRef.current.filter(q => !!q.solution);
+        if (!currentList || currentList.length === 0) {
+            setAudioStatusMessage("No solutions available to play.");
+            return;
+        }
 
-            setActiveAudioIndex(boundedIndex);
-            stopCurrentAudio();
+        const boundedIndex = ((index % currentList.length) + currentList.length) % currentList.length;
+        const targetQ = currentList[boundedIndex];
+        if (!targetQ || !targetQ.solution) {
+            setAudioStatusMessage(`Question ${boundedIndex + 1} has no solution.`);
+            return;
+        }
 
-            setAudioStatusMessage(`Encoding spoken audio for Question ${targetQ.questionNumber || boundedIndex + 1}...`);
+        setActiveAudioIndex(boundedIndex);
+        setAudioStatusMessage(`Preparing Question ${targetQ.questionNumber || boundedIndex + 1}...`);
 
-            (async () => {
-                try {
-                    let cached = audioDataCacheRef.current.get(targetQ.id);
-                    if (!cached) {
+        // Stop any currently playing audio immediately
+        if (currentAudioRef.current) {
+            try {
+                currentAudioRef.current.pause();
+                currentAudioRef.current.currentTime = 0;
+            } catch { }
+        }
+        if (typeof window !== "undefined" && "speechSynthesis" in window) {
+            try { window.speechSynthesis.cancel(); } catch { }
+        }
+        setIsAudioPlaying(false);
+
+        try {
+            let cached = audioDataCacheRef.current.get(targetQ.id);
+            if (!cached) {
+                let dataPromise = inFlightTranscribeRef.current.get(targetQ.id);
+                if (!dataPromise) {
+                    dataPromise = (async () => {
                         const res = await fetch("/api/transcribe", {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
@@ -874,58 +1002,104 @@ export default function ScannerApp() {
                         });
 
                         if (!res.ok) {
-                            const errJson = await res.json();
+                            const errJson = await res.json().catch(() => ({}));
                             throw new Error(errJson.error || `Transcribe failed: ${res.status}`);
                         }
+                        return await res.json();
+                    })();
+                    inFlightTranscribeRef.current.set(targetQ.id, dataPromise);
+                }
 
-                        const data = await res.json();
-                        cached = {
-                            audioDataUrl: data.audioDataUrl,
-                            transcript: data.transcript,
-                            spokenText: data.spokenText,
-                            questionIntro: data.questionIntro,
-                        };
-                        audioDataCacheRef.current.set(targetQ.id, cached);
+                const data = await dataPromise;
+                inFlightTranscribeRef.current.delete(targetQ.id);
 
-                        setSavedQuestions(prev => prev.map(q => q.id === targetQ.id ? {
-                            ...q,
-                            transcript: data.transcript,
-                            audioDataUrl: data.audioDataUrl,
-                            questionIntro: data.questionIntro
-                        } : q));
+                cached = {
+                    audioDataUrl: data.audioDataUrl,
+                    transcript: data.transcript,
+                    spokenText: data.spokenText,
+                    questionIntro: data.questionIntro,
+                };
+                audioDataCacheRef.current.set(targetQ.id, cached);
+
+                setSavedQuestions(prev => prev.map(q => q.id === targetQ.id ? {
+                    ...q,
+                    transcript: data.transcript,
+                    audioDataUrl: data.audioDataUrl,
+                    questionIntro: data.questionIntro
+                } : q));
+            }
+
+            // CRITICAL CHECK: If user switched questions or stopped while fetching, abort immediately!
+            if (audioPlayTokenRef.current !== currentToken) {
+                console.log(`[Audio] Discarding stale audio playback for token ${currentToken}`);
+                return;
+            }
+
+            // Extra safeguard: Stop again right before playback
+            if (currentAudioRef.current) {
+                try {
+                    currentAudioRef.current.pause();
+                    currentAudioRef.current.currentTime = 0;
+                } catch { }
+            }
+            if (typeof window !== "undefined" && "speechSynthesis" in window) {
+                try { window.speechSynthesis.cancel(); } catch { }
+            }
+
+            if (cached.audioDataUrl) {
+                let audio = currentAudioRef.current;
+                if (!audio) {
+                    audio = new Audio();
+                    currentAudioRef.current = audio;
+                }
+
+                audio.pause();
+                audio.src = cached.audioDataUrl;
+                audio.loop = true;
+                audio.playbackRate = speechRate;
+                audio.onplay = () => {
+                    if (audioPlayTokenRef.current === currentToken) setIsAudioPlaying(true);
+                };
+                audio.onpause = () => {
+                    if (audioPlayTokenRef.current === currentToken) setIsAudioPlaying(false);
+                };
+                audio.onerror = () => {
+                    if (audioPlayTokenRef.current === currentToken) {
+                        console.warn("Audio element error. Falling back to browser speech synthesis.");
+                        playBrowserSpeechFallback(cached!.spokenText);
                     }
+                };
 
-                    if (cached.audioDataUrl) {
-                        const audio = new Audio(cached.audioDataUrl);
-                        audio.loop = true;
-                        audio.playbackRate = speechRate;
-                        audio.onplay = () => setIsAudioPlaying(true);
-                        audio.onpause = () => setIsAudioPlaying(false);
-                        audio.onerror = () => {
-                            console.warn("Audio element error. Falling back to browser speech synthesis.");
-                            playBrowserSpeechFallback(cached!.spokenText);
-                        };
-
-                        currentAudioRef.current = audio;
-                        await audio.play();
+                try {
+                    await audio.play();
+                    if (audioPlayTokenRef.current === currentToken) {
                         setIsAudioPlaying(true);
                         setAudioStatusMessage(`Playing Question ${targetQ.questionNumber || boundedIndex + 1} (Looping, ${speechRate}x)`);
+                    }
+                } catch (playErr: any) {
+                    console.warn("audio.play() error:", playErr);
+                    if (playErr.name === "NotAllowedError") {
+                        setAudioStatusMessage(`Tap ▶️ Play to listen to Question ${targetQ.questionNumber || boundedIndex + 1}`);
                     } else {
                         playBrowserSpeechFallback(cached.spokenText);
                         setAudioStatusMessage(`Playing Question ${targetQ.questionNumber || boundedIndex + 1} (Browser Speech, Looping, ${speechRate}x)`);
                     }
-
-                    // Prefetch the remaining questions in background
-                    prefetchRemainingAudio(solvedList, boundedIndex);
-                } catch (err: unknown) {
-                    console.error("Play question audio error:", err);
-                    setAudioStatusMessage("Audio playback failed: " + getErrorMessage(err));
                 }
-            })();
+            } else {
+                playBrowserSpeechFallback(cached.spokenText);
+                setAudioStatusMessage(`Playing Question ${targetQ.questionNumber || boundedIndex + 1} (Browser Speech, Looping, ${speechRate}x)`);
+            }
 
-            return currentSaved;
-        });
-    }, [stopCurrentAudio, playBrowserSpeechFallback, prefetchRemainingAudio, speechRate]);
+            // Trigger background prefetch for remaining questions
+            prefetchRemainingAudio(currentList, boundedIndex);
+        } catch (err: unknown) {
+            inFlightTranscribeRef.current.delete(targetQ.id);
+            if (audioPlayTokenRef.current === currentToken) {
+                console.error("Play question audio error:", err);
+                setAudioStatusMessage("Audio playback failed: " + getErrorMessage(err));
+            }
+        }
+    }, [speechRate, playBrowserSpeechFallback, prefetchRemainingAudio]);
 
     const autoSolveAndPlay = useCallback(async (questionsToSolve: ScannedQuestion[]) => {
         if (!questionsToSolve || questionsToSolve.length === 0) return;
@@ -949,21 +1123,14 @@ export default function ScannerApp() {
             const solveData = await solveRes.json();
             const solutionsMap: Record<string, string> = solveData.solutions || {};
 
-            const solvedList: ScannedQuestion[] = [];
-
-            setSavedQuestions(prev => {
-                const updated = prev.map(q => {
-                    const sol = solutionsMap[q.id];
-                    if (sol) {
-                        const solvedItem = { ...q, solution: sol, isSolving: false };
-                        solvedList.push(solvedItem);
-                        return solvedItem;
-                    }
-                    return { ...q, isSolving: false };
-                });
-                return updated;
+            // Map solutions to questions deterministically with fuzzy key support
+            const updatedQuestions = questionsToSolve.map((q, idx) => {
+                const sol = findSolutionForQuestion(q, idx, solutionsMap);
+                return sol ? { ...q, solution: sol, isSolving: false } : { ...q, isSolving: false };
             });
 
+            setSavedQuestions(updatedQuestions);
+            const solvedList = updatedQuestions.filter(q => !!q.solution);
             setExpandedSolutionIds(new Set(questionsToSolve.map(q => q.id)));
 
             if (solvedList.length > 0) {
@@ -984,7 +1151,7 @@ export default function ScannerApp() {
     const toggleAudioPlayPause = useCallback(() => {
         if (currentAudioRef.current) {
             if (currentAudioRef.current.paused) {
-                currentAudioRef.current.play();
+                currentAudioRef.current.play().catch(() => {});
                 setIsAudioPlaying(true);
             } else {
                 currentAudioRef.current.pause();
@@ -999,30 +1166,32 @@ export default function ScannerApp() {
                     window.speechSynthesis.pause();
                     setIsAudioPlaying(false);
                 }
-            } else if (activeAudioIndex !== null) {
-                playQuestionAudio(activeAudioIndex);
+            } else if (activeAudioIndexRef.current !== null) {
+                playQuestionAudio(activeAudioIndexRef.current);
             }
-        } else if (activeAudioIndex !== null) {
-            playQuestionAudio(activeAudioIndex);
+        } else if (activeAudioIndexRef.current !== null) {
+            playQuestionAudio(activeAudioIndexRef.current);
         } else {
-            const solved = savedQuestions.filter(q => !!q.solution);
+            const solved = savedQuestionsRef.current.filter(q => !!q.solution);
             if (solved.length > 0) playQuestionAudio(0, solved);
         }
-    }, [activeAudioIndex, playQuestionAudio, savedQuestions]);
+    }, [playQuestionAudio]);
 
     const cycleNextSolution = useCallback(() => {
-        const solved = savedQuestions.filter(q => !!q.solution);
+        const solved = savedQuestionsRef.current.filter(q => !!q.solution);
         if (solved.length === 0) return;
-        const nextIndex = activeAudioIndex === null ? 0 : (activeAudioIndex + 1) % solved.length;
+        const currentIdx = activeAudioIndexRef.current;
+        const nextIndex = currentIdx === null ? 0 : (currentIdx + 1) % solved.length;
         playQuestionAudio(nextIndex, solved);
-    }, [savedQuestions, activeAudioIndex, playQuestionAudio]);
+    }, [playQuestionAudio]);
 
     const cyclePrevSolution = useCallback(() => {
-        const solved = savedQuestions.filter(q => !!q.solution);
+        const solved = savedQuestionsRef.current.filter(q => !!q.solution);
         if (solved.length === 0) return;
-        const prevIndex = activeAudioIndex === null ? 0 : (activeAudioIndex - 1 + solved.length) % solved.length;
+        const currentIdx = activeAudioIndexRef.current;
+        const prevIndex = currentIdx === null ? 0 : (currentIdx - 1 + solved.length) % solved.length;
         playQuestionAudio(prevIndex, solved);
-    }, [savedQuestions, activeAudioIndex, playQuestionAudio]);
+    }, [playQuestionAudio]);
 
     // Clean up audio on unmount
     useEffect(() => {
@@ -1117,27 +1286,33 @@ export default function ScannerApp() {
         const imageData = ctx.getImageData(0, 0, 32, 32);
         const data = imageData.data;
         let totalLuminance = 0;
-        let maxLuminance = 0;
         const pixelCount = data.length / 4;
+        const luminances: number[] = [];
 
         for (let i = 0; i < data.length; i += 4) {
             const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
             totalLuminance += lum;
-            if (lum > maxLuminance) maxLuminance = lum;
+            luminances.push(lum);
         }
 
         const avgLuminance = totalLuminance / pixelCount;
-        // Covered camera threshold: average luminance < 15 and max luminance < 35
-        const isDark = avgLuminance < 15 && maxLuminance < 35;
+        luminances.sort((a, b) => a - b);
+        const p95Luminance = luminances[Math.floor(pixelCount * 0.95)] || avgLuminance;
+
+        // Covered camera threshold: average luminance < 28 and 95th percentile < 55
+        // This reliably handles palm/finger skin scatter and camera auto-ISO in lit rooms
+        const isDark = avgLuminance < 28 && p95Luminance < 55;
         return { isDark, avgLuminance };
     }, []);
 
-    // ── Camera Polling for Complete Darkness (Scan Mode) ──────────────────────
+    // ── Camera Polling for Darkness (Scan Mode & Gesture Refresh/Reset) ──────
     useEffect(() => {
         if (!mounted || imageSolveMode || scanStatus === "scanning" || cameraError) {
             darknessStartTimeRef.current = null;
             abortedDueToLongDarknessRef.current = false;
             countdownTriggeredByDarknessRef.current = false;
+            isRefreshArmedRef.current = false;
+            consecutiveLightTicksRef.current = 0;
             setDarknessDuration(0);
             return;
         }
@@ -1146,7 +1321,17 @@ export default function ScannerApp() {
             const { isDark } = checkFrameDarkness();
             const now = Date.now();
 
-            const solvedQuestions = savedQuestions.filter(q => !!q.solution);
+            if (isDark) {
+                consecutiveLightTicksRef.current = 0;
+            } else {
+                consecutiveLightTicksRef.current += 1;
+            }
+
+            // Sustained light (>= 300ms / 3 ticks) required to declare genuinely uncovered
+            const isSustainedLight = !isDark && consecutiveLightTicksRef.current >= 3;
+
+            const currentSaved = savedQuestionsRef.current;
+            const solvedQuestions = currentSaved.filter(q => !!q.solution);
             const hasActiveSolutions = solvedQuestions.length > 0;
 
             if (hasActiveSolutions) {
@@ -1154,15 +1339,17 @@ export default function ScannerApp() {
                 if (isDark) {
                     if (darknessStartTimeRef.current === null) {
                         darknessStartTimeRef.current = now;
+                        isRefreshArmedRef.current = false;
                     }
 
                     const elapsed = (now - darknessStartTimeRef.current) / 1000;
                     setDarknessDuration(elapsed);
 
-                    // 10s Continuous Darkness -> RESET
+                    // 10s Continuous Darkness -> FULL RESET
                     if (elapsed >= 10.0) {
                         console.log("[Gesture] 10s continuous darkness -> RESET TRIGGERED!");
                         darknessStartTimeRef.current = null;
+                        isRefreshArmedRef.current = false;
                         setDarknessDuration(0);
                         abortedDueToLongDarknessRef.current = true; // Wait for uncover
                         stopCurrentAudio();
@@ -1174,46 +1361,50 @@ export default function ScannerApp() {
                         setDarknessStatus("aborted");
                         setDarknessAbortMessage("RESET complete: All questions cleared. Uncover camera to resume scan polling.");
                         playCancelSound();
-                        try { if ("vibrate" in navigator) navigator.vibrate([200, 100, 200]); } catch { }
+                        try { if ("vibrate" in navigator) navigator.vibrate([250, 100, 250]); } catch { }
                         return;
-                    } else if (elapsed >= 4.5 && elapsed <= 7.5) {
+                    } else if (elapsed >= 5.0) {
+                        // At 5.0 seconds: Play refresh chime sound immediately to notify user!
+                        if (!isRefreshArmedRef.current) {
+                            console.log("[Gesture] 5.0s reached! Refresh sound initiated & armed!");
+                            isRefreshArmedRef.current = true;
+                            playRefreshArmedSound();
+                            try { if ("vibrate" in navigator) navigator.vibrate([150, 75, 150]); } catch { }
+                        }
                         setDarknessStatus("covering");
-                        setDarknessAbortMessage("Ready! Release now to cycle to next solution (Refresh)");
-                    } else if (elapsed > 7.5) {
-                        setDarknessStatus("covering");
-                        setDarknessAbortMessage(`Hold until 10s to RESET (${(10 - elapsed).toFixed(1)}s remaining)`);
+                        const currentIdx = activeAudioIndexRef.current || 0;
+                        const nextNum = ((currentIdx + 1) % solvedQuestions.length) + 1;
+                        setDarknessAbortMessage(`🔄 Armed! Release camera now to play Question ${nextNum} (or hold 10s to Reset)`);
                     } else {
                         setDarknessStatus("covering");
-                        setDarknessAbortMessage(`Covering camera: ${elapsed.toFixed(1)}s (Release at 5s to cycle, hold 10s to reset)`);
+                        setDarknessAbortMessage(`Covering camera: ${elapsed.toFixed(1)}s (Hold 5s for sound to refresh, 10s to reset)`);
                     }
-                } else {
-                    // Light detected! Camera uncovered.
+                } else if (isSustainedLight) {
+                    // Sustained light detected: camera uncovered
                     if (abortedDueToLongDarknessRef.current) {
                         console.log("[Gesture] Camera uncovered after reset. Ready for scan.");
                         abortedDueToLongDarknessRef.current = false;
                         setDarknessStatus("idle");
                         setDarknessAbortMessage(null);
                         darknessStartTimeRef.current = null;
+                        isRefreshArmedRef.current = false;
                         setDarknessDuration(0);
                         return;
                     }
 
                     if (darknessStartTimeRef.current !== null) {
-                        const coverDuration = (now - darknessStartTimeRef.current) / 1000;
+                        const armed = isRefreshArmedRef.current;
                         darknessStartTimeRef.current = null;
+                        isRefreshArmedRef.current = false;
                         setDarknessDuration(0);
                         setDarknessStatus("idle");
                         setDarknessAbortMessage(null);
 
-                        // REFRESH: 5s with 1-2s buffer (4.5s to 7.5s)
-                        if (coverDuration >= 4.5 && coverDuration <= 7.5) {
-                            console.log(`[Gesture] Camera uncovered after ${coverDuration.toFixed(1)}s -> REFRESH TRIGGERED!`);
+                        if (armed) {
+                            console.log("[Gesture] Camera uncovered after 5s sound -> REFRESH / NEXT QUESTION!");
                             playBoopSound();
                             try { if ("vibrate" in navigator) navigator.vibrate([100, 50, 100]); } catch { }
-                            const nextIndex = activeAudioIndex === null ? 0 : (activeAudioIndex + 1) % solvedQuestions.length;
-                            playQuestionAudio(nextIndex, solvedQuestions);
-                        } else {
-                            console.log(`[Gesture] Camera uncovered after ${coverDuration.toFixed(1)}s (not within 4.5s - 7.5s buffer)`);
+                            cycleNextSolution();
                         }
                     } else {
                         setDarknessStatus("idle");
@@ -1224,12 +1415,8 @@ export default function ScannerApp() {
 
             // ── IDLE / SCAN MODE (No active solutions) ─────────────────────
             if (isDark) {
-                // If already aborted at countdown end, do not re-trigger while darkness persists! Wait for light.
-                if (abortedDueToLongDarknessRef.current) {
-                    return;
-                }
+                if (abortedDueToLongDarknessRef.current) return;
 
-                // If countdown is active, camera is currently covered during countdown
                 if (countdown !== null) {
                     setDarknessDuration(5);
                     return;
@@ -1242,7 +1429,6 @@ export default function ScannerApp() {
                 const elapsed = (now - darknessStartTimeRef.current) / 1000;
                 setDarknessDuration(Math.min(elapsed, 5));
 
-                // Trigger scan countdown at the 5.0-second mark of continuous darkness
                 if (elapsed >= 5.0 && !countdownTriggeredByDarknessRef.current && countdown === null) {
                     console.log("[Darkness Poller] Darkness reached 5s! Initiating countdown.");
                     countdownTriggeredByDarknessRef.current = true;
@@ -1254,10 +1440,8 @@ export default function ScannerApp() {
                 } else if (elapsed < 5.0) {
                     setDarknessStatus("covering");
                 }
-            } else {
-                // Camera sees light!
+            } else if (isSustainedLight) {
                 if (abortedDueToLongDarknessRef.current) {
-                    // Re-arm sensor now that the camera has been uncovered
                     console.log("[Darkness Poller] Camera uncovered. Sensor re-armed.");
                     abortedDueToLongDarknessRef.current = false;
                     setDarknessStatus("idle");
@@ -1274,7 +1458,7 @@ export default function ScannerApp() {
         }, 100);
 
         return () => clearInterval(interval);
-    }, [mounted, imageSolveMode, scanStatus, cameraError, countdown, captureDelay, checkFrameDarkness, savedQuestions, activeAudioIndex, playQuestionAudio, stopCurrentAudio]);
+    }, [mounted, imageSolveMode, scanStatus, cameraError, countdown, captureDelay, checkFrameDarkness, cycleNextSolution, stopCurrentAudio]);
 
     // ── Countdown for scan ────────────────────────────────────────────────────
     useEffect(() => {

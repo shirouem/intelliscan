@@ -98,8 +98,14 @@ ${JSON.stringify(questions, null, 2)}
         }
 
         try {
-            // NO FANCY PARSING: Just string replace the markdown backticks if they are there
-            const cleanText = rawText.replace(/```json/gi, "").replace(/```/g, "").trim();
+            // Strip any markdown code fences or conversational preamble
+            let cleanText = rawText.trim();
+            cleanText = cleanText.replace(/```json/gi, "").replace(/```/g, "").trim();
+            const firstBrace = cleanText.indexOf('{');
+            const lastBrace = cleanText.lastIndexOf('}');
+            if (firstBrace !== -1 && lastBrace !== -1 && lastBrace >= firstBrace) {
+                cleanText = cleanText.substring(firstBrace, lastBrace + 1);
+            }
             const parsedSolutions = JSON.parse(cleanText);
 
             return NextResponse.json({ solutions: parsedSolutions });
