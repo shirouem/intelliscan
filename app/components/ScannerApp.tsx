@@ -393,6 +393,7 @@ export default function ScannerApp() {
     // ── Spoken Audio Playback & Looping ───────────────────────────────────────
     const [activeAudioIndex, setActiveAudioIndex] = useState<number | null>(null);
     const [isAudioPlaying, setIsAudioPlaying] = useState<boolean>(false);
+    const [speechRate, setSpeechRate] = useState<number>(0.8);
     const [audioStatusMessage, setAudioStatusMessage] = useState<string | null>(null);
     const currentAudioRef = useRef<HTMLAudioElement | null>(null);
     const speechUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
@@ -762,7 +763,7 @@ export default function ScannerApp() {
         try {
             window.speechSynthesis.cancel();
             const utterance = new SpeechSynthesisUtterance(text);
-            utterance.rate = 0.95;
+            utterance.rate = speechRate;
             utterance.onend = () => {
                 if (isLoopingRef.current) {
                     setTimeout(() => {
@@ -775,6 +776,32 @@ export default function ScannerApp() {
             setIsAudioPlaying(true);
         } catch (e) {
             console.warn("Speech synthesis fallback failed:", e);
+        }
+    }, [speechRate]);
+
+    const changeSpeechRate = useCallback((newRate: number) => {
+        const clamped = Math.max(0.5, Math.min(1.5, Math.round(newRate * 100) / 100));
+        setSpeechRate(clamped);
+        if (currentAudioRef.current) {
+            currentAudioRef.current.playbackRate = clamped;
+        }
+        if (speechUtteranceRef.current && typeof window !== "undefined" && "speechSynthesis" in window) {
+            speechUtteranceRef.current.rate = clamped;
+        }
+    }, []);
+
+    const rewindAudio = useCallback((seconds = 5) => {
+        if (currentAudioRef.current) {
+            currentAudioRef.current.currentTime = Math.max(0, currentAudioRef.current.currentTime - seconds);
+        }
+    }, []);
+
+    const forwardAudio = useCallback((seconds = 5) => {
+        if (currentAudioRef.current) {
+            currentAudioRef.current.currentTime = Math.min(
+                currentAudioRef.current.duration || 9999,
+                currentAudioRef.current.currentTime + seconds
+            );
         }
     }, []);
 
@@ -793,6 +820,7 @@ export default function ScannerApp() {
                         questionText: q.text,
                         solutionText: q.solution,
                         questionNumber: q.questionNumber || String(nextIdx + 1),
+                        speed: speechRate,
                     }),
                 });
                 if (res.ok) {
@@ -814,7 +842,7 @@ export default function ScannerApp() {
                 console.warn("Background prefetch failed for question:", q.id, e);
             }
         }
-    }, []);
+    }, [speechRate]);
 
     const playQuestionAudio = useCallback(async (index: number, list?: ScannedQuestion[]) => {
         setSavedQuestions(currentSaved => {
@@ -841,6 +869,7 @@ export default function ScannerApp() {
                                 questionText: targetQ.text,
                                 solutionText: targetQ.solution,
                                 questionNumber: targetQ.questionNumber || String(boundedIndex + 1),
+                                speed: speechRate,
                             }),
                         });
 
@@ -869,6 +898,7 @@ export default function ScannerApp() {
                     if (cached.audioDataUrl) {
                         const audio = new Audio(cached.audioDataUrl);
                         audio.loop = true;
+                        audio.playbackRate = speechRate;
                         audio.onplay = () => setIsAudioPlaying(true);
                         audio.onpause = () => setIsAudioPlaying(false);
                         audio.onerror = () => {
@@ -879,10 +909,10 @@ export default function ScannerApp() {
                         currentAudioRef.current = audio;
                         await audio.play();
                         setIsAudioPlaying(true);
-                        setAudioStatusMessage(`Playing Question ${targetQ.questionNumber || boundedIndex + 1} (Looping)`);
+                        setAudioStatusMessage(`Playing Question ${targetQ.questionNumber || boundedIndex + 1} (Looping, ${speechRate}x)`);
                     } else {
                         playBrowserSpeechFallback(cached.spokenText);
-                        setAudioStatusMessage(`Playing Question ${targetQ.questionNumber || boundedIndex + 1} (Browser Speech, Looping)`);
+                        setAudioStatusMessage(`Playing Question ${targetQ.questionNumber || boundedIndex + 1} (Browser Speech, Looping, ${speechRate}x)`);
                     }
 
                     // Prefetch the remaining questions in background
@@ -895,7 +925,7 @@ export default function ScannerApp() {
 
             return currentSaved;
         });
-    }, [stopCurrentAudio, playBrowserSpeechFallback, prefetchRemainingAudio]);
+    }, [stopCurrentAudio, playBrowserSpeechFallback, prefetchRemainingAudio, speechRate]);
 
     const autoSolveAndPlay = useCallback(async (questionsToSolve: ScannedQuestion[]) => {
         if (!questionsToSolve || questionsToSolve.length === 0) return;
@@ -2628,7 +2658,12 @@ export default function ScannerApp() {
                                     <span className="audio-pulse-icon">{isAudioPlaying ? "🔊" : "🔈"}</span>
                                     <span>Playing Question {activeQ?.questionNumber || currentIdx + 1} of {solvedList.length}</span>
                                 </div>
-                                <span className="audio-loop-badge">🔁 Looping</span>
+                                <div style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                                    <span className="audio-loop-badge" style={{ background: "hsla(200, 70%, 40%, 0.25)", color: "hsl(200, 80%, 65%)", borderColor: "hsla(200, 70%, 40%, 0.4)" }}>
+                                        ✍️ Paced Pauses
+                                    </span>
+                                    <span className="audio-loop-badge">🔁 Looping</span>
+                                </div>
                             </div>
 
                             {activeQ?.questionIntro && (
@@ -2637,8 +2672,46 @@ export default function ScannerApp() {
                                 </div>
                             )}
 
+                            {/* Speech Speed Controls */}
+                            <div className="audio-speed-row">
+                                <span className="audio-speed-label">
+                                    Speech Speed: <strong>{speechRate.toFixed(2)}x</strong> {speechRate <= 0.85 ? "(Dictation Pace)" : ""}
+                                </span>
+                                <div className="audio-speed-presets">
+                                    {[0.65, 0.75, 0.85, 1.0].map((rate) => (
+                                        <button
+                                            key={rate}
+                                            type="button"
+                                            className={`speed-preset-btn ${speechRate === rate ? 'active' : ''}`}
+                                            onClick={() => changeSpeechRate(rate)}
+                                        >
+                                            {rate}x
+                                        </button>
+                                    ))}
+                                    <div className="speed-stepper">
+                                        <button
+                                            type="button"
+                                            className="speed-step-btn"
+                                            onClick={() => changeSpeechRate(speechRate - 0.05)}
+                                            title="Slower speed"
+                                        >
+                                            −
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="speed-step-btn"
+                                            onClick={() => changeSpeechRate(speechRate + 0.05)}
+                                            title="Faster speed"
+                                        >
+                                            +
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Player seeking & navigation controls */}
                             <div className="audio-player-controls">
-                                <div style={{ display: "flex", gap: "0.4rem" }}>
+                                <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap", alignItems: "center" }}>
                                     <button
                                         type="button"
                                         className="audio-ctrl-btn"
@@ -2646,6 +2719,14 @@ export default function ScannerApp() {
                                         title="Previous Question"
                                     >
                                         ⏮️ Prev
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="audio-ctrl-btn"
+                                        onClick={() => rewindAudio(5)}
+                                        title="Rewind 5 seconds (re-hear sentence)"
+                                    >
+                                        ⏪ -5s
                                     </button>
                                     <button
                                         type="button"
@@ -2658,10 +2739,18 @@ export default function ScannerApp() {
                                     <button
                                         type="button"
                                         className="audio-ctrl-btn"
+                                        onClick={() => forwardAudio(5)}
+                                        title="Skip forward 5 seconds"
+                                    >
+                                        +5s ⏩
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="audio-ctrl-btn"
                                         onClick={cycleNextSolution}
                                         title="Next Question (Refresh)"
                                     >
-                                        ⏭️ Next
+                                        Next ⏭️
                                     </button>
                                 </div>
 

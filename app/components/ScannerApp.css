@@ -1858,3 +1858,80 @@
     margin-bottom: 0.3rem;
 }
 
+.audio-speed-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    padding: 0.45rem 0.75rem;
+    background: hsla(0, 0%, 0%, 0.28);
+    border-radius: var(--radius-sm);
+    border: 1px solid hsla(0, 0%, 100%, 0.08);
+}
+
+.audio-speed-label {
+    font-size: 0.78rem;
+    color: hsl(var(--text-secondary));
+}
+
+.audio-speed-label strong {
+    color: hsl(var(--accent-primary));
+}
+
+.audio-speed-presets {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.speed-preset-btn {
+    background: hsla(0, 0%, 100%, 0.06);
+    border: 1px solid hsla(0, 0%, 100%, 0.12);
+    color: hsl(var(--text-muted));
+    padding: 0.25rem 0.55rem;
+    border-radius: var(--radius-sm);
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.speed-preset-btn:hover {
+    background: hsla(0, 0%, 100%, 0.15);
+    color: hsl(var(--text-primary));
+}
+
+.speed-preset-btn.active {
+    background: hsl(var(--accent-primary));
+    color: hsl(var(--bg-primary));
+    border-color: hsl(var(--accent-primary));
+}
+
+.speed-stepper {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    margin-left: 0.3rem;
+}
+
+.speed-step-btn {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: hsla(0, 0%, 100%, 0.08);
+    border: 1px solid hsla(0, 0%, 100%, 0.15);
+    color: hsl(var(--text-primary));
+    border-radius: 4px;
+    font-size: 0.85rem;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+.speed-step-btn:hover {
+    background: hsla(0, 0%, 100%, 0.2);
+}
+
+
