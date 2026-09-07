@@ -2,6 +2,7 @@
 
 import React, { useRef, useState, useCallback, useEffect } from "react";
 import "./ScannerApp.css";
+import { DEFAULT_SOLVE_PROMPT, DEFAULT_TRANSCRIBE_PROMPT } from "@/app/constants/prompts";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface ScannedQuestion {
@@ -195,6 +196,8 @@ const createWavDataUri = (sampleRate: number, generateSample: (t: number, dur: n
 
 let boopAudioElement: HTMLAudioElement | null = null;
 let cancelAudioElement: HTMLAudioElement | null = null;
+let transcribeStartAudioElement: HTMLAudioElement | null = null;
+let transcribeDoneAudioElement: HTMLAudioElement | null = null;
 let sharedAudioCtx: AudioContext | null = null;
 
 const getSharedAudioContext = () => {
@@ -380,6 +383,170 @@ const playRefreshArmedSound = () => {
     }
 };
 
+const getTranscribeStartAudio = () => {
+    if (typeof window === "undefined") return null;
+    if (!transcribeStartAudioElement) {
+        try {
+            const uri = createWavDataUri(22050, (t, dur) => {
+                let freq = 440;
+                let tSeg = t;
+                if (t < 0.07) {
+                    freq = 440; // A4
+                    tSeg = t / 0.07;
+                } else if (t < 0.14) {
+                    freq = 659.25; // E5
+                    tSeg = (t - 0.07) / 0.07;
+                } else {
+                    freq = 880; // A5
+                    tSeg = (t - 0.14) / 0.08;
+                }
+                const env = Math.max(0, 1 - tSeg * 0.8) * Math.max(0, 1 - t / dur);
+                return Math.sin(2 * Math.PI * freq * t) * env * 0.85;
+            }, 0.22);
+            transcribeStartAudioElement = new Audio(uri);
+            transcribeStartAudioElement.volume = 0.85;
+        } catch { }
+    }
+    return transcribeStartAudioElement;
+};
+
+const getTranscribeDoneAudio = () => {
+    if (typeof window === "undefined") return null;
+    if (!transcribeDoneAudioElement) {
+        try {
+            const uri = createWavDataUri(22050, (t, dur) => {
+                const env = Math.pow(Math.max(0, 1 - t / dur), 1.5);
+                const freq = t < 0.10 ? 587.33 : 1046.5; // D5 -> C6
+                const sample = Math.sin(2 * Math.PI * freq * t) * 0.75 + Math.sin(2 * Math.PI * freq * 2 * t) * 0.2;
+                return sample * env * 0.85;
+            }, 0.35);
+            transcribeDoneAudioElement = new Audio(uri);
+            transcribeDoneAudioElement.volume = 0.85;
+        } catch { }
+    }
+    return transcribeDoneAudioElement;
+};
+
+const playTranscribeStartSound = () => {
+    if (typeof window === "undefined") return;
+
+    try {
+        const audio = getTranscribeStartAudio();
+        if (audio) {
+            audio.currentTime = 0;
+            audio.play().catch(() => {});
+        }
+    } catch {}
+
+    try {
+        const ctx = getSharedAudioContext();
+        if (ctx) {
+            const synth = () => {
+                const now = ctx.currentTime;
+                // Tone 1: 440Hz (A4)
+                const osc1 = ctx.createOscillator();
+                const gain1 = ctx.createGain();
+                osc1.type = "sine";
+                osc1.frequency.setValueAtTime(440, now);
+                gain1.gain.setValueAtTime(0.35, now);
+                gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+                osc1.connect(gain1);
+                gain1.connect(ctx.destination);
+                osc1.start(now);
+                osc1.stop(now + 0.07);
+
+                // Tone 2: 659.25Hz (E5)
+                const osc2 = ctx.createOscillator();
+                const gain2 = ctx.createGain();
+                osc2.type = "sine";
+                osc2.frequency.setValueAtTime(659.25, now + 0.07);
+                gain2.gain.setValueAtTime(0.35, now + 0.07);
+                gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+                osc2.connect(gain2);
+                gain2.connect(ctx.destination);
+                osc2.start(now + 0.07);
+                osc2.stop(now + 0.14);
+
+                // Tone 3: 880Hz (A5)
+                const osc3 = ctx.createOscillator();
+                const gain3 = ctx.createGain();
+                osc3.type = "sine";
+                osc3.frequency.setValueAtTime(880, now + 0.14);
+                gain3.gain.setValueAtTime(0.4, now + 0.14);
+                gain3.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+                osc3.connect(gain3);
+                gain3.connect(ctx.destination);
+                osc3.start(now + 0.14);
+                osc3.stop(now + 0.24);
+            };
+
+            if (ctx.state === "suspended") {
+                ctx.resume().then(synth).catch(() => {});
+            } else {
+                synth();
+            }
+        }
+    } catch (e) {
+        console.warn("Could not play transcribe start sound:", e);
+    }
+
+    try { if ("vibrate" in navigator) navigator.vibrate(80); } catch {}
+};
+
+const playTranscribeDoneSound = () => {
+    if (typeof window === "undefined") return;
+
+    try {
+        const audio = getTranscribeDoneAudio();
+        if (audio) {
+            audio.currentTime = 0;
+            audio.play().catch(() => {});
+        }
+    } catch {}
+
+    try {
+        const ctx = getSharedAudioContext();
+        if (ctx) {
+            const synth = () => {
+                const now = ctx.currentTime;
+                // Tone 1: 587.33Hz (D5)
+                const osc1 = ctx.createOscillator();
+                const gain1 = ctx.createGain();
+                osc1.type = "sine";
+                osc1.frequency.setValueAtTime(587.33, now);
+                gain1.gain.setValueAtTime(0.3, now);
+                gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+                osc1.connect(gain1);
+                gain1.connect(ctx.destination);
+                osc1.start(now);
+                osc1.stop(now + 0.12);
+
+                // Tone 2: 1046.5Hz (C6) with overtone
+                const osc2 = ctx.createOscillator();
+                const gain2 = ctx.createGain();
+                osc2.type = "sine";
+                osc2.frequency.setValueAtTime(1046.5, now + 0.09);
+                gain2.gain.setValueAtTime(0.4, now + 0.09);
+                gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.38);
+                osc2.connect(gain2);
+                gain2.connect(ctx.destination);
+                osc2.start(now + 0.09);
+                osc2.stop(now + 0.38);
+            };
+
+            if (ctx.state === "suspended") {
+                ctx.resume().then(synth).catch(() => {});
+            } else {
+                synth();
+            }
+        }
+    } catch (e) {
+        console.warn("Could not play transcribe done sound:", e);
+    }
+
+    try { if ("vibrate" in navigator) navigator.vibrate([60, 50, 100]); } catch {}
+};
+
 /**
  * Resilient solution key matcher that handles any AI formatting:
  * e.g. "q1", "1", "question1", "Question 1", or positional array index.
@@ -466,10 +633,17 @@ export default function ScannerApp() {
     const [bottomTab, setBottomTab] = useState<"questions" | "imagesolve">("questions");
 
     // ── Settings ──────────────────────────────────────────────────────────────
-    const defaultSolvePrompt =
-        "You are an expert tutor. I am providing you with an array of questions extracted from a question paper.\nPlease solve each question accurately and provide a clear, step-by-step solution.";
-    const [customSolvePrompt, setCustomSolvePrompt] = useState(defaultSolvePrompt);
+    const defaultSolvePrompt = DEFAULT_SOLVE_PROMPT;
+    const defaultTranscribePrompt = DEFAULT_TRANSCRIBE_PROMPT;
+    const [customSolvePrompt, setCustomSolvePrompt] = useState(DEFAULT_SOLVE_PROMPT);
+    const [customTranscribePrompt, setCustomTranscribePrompt] = useState(DEFAULT_TRANSCRIBE_PROMPT);
+    const [settingsTab, setSettingsTab] = useState<"solve" | "transcribe">("solve");
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+    const customTranscribePromptRef = useRef(customTranscribePrompt);
+
+    useEffect(() => {
+        customTranscribePromptRef.current = customTranscribePrompt;
+    }, [customTranscribePrompt]);
 
     // ── Edit mode ─────────────────────────────────────────────────────────────
     const [editingId, setEditingId] = useState<string | null>(null);
@@ -498,7 +672,10 @@ export default function ScannerApp() {
     const savedQuestionsRef = useRef<ScannedQuestion[]>([]);
     const activeAudioIndexRef = useRef<number | null>(null);
     const consecutiveLightTicksRef = useRef<number>(0);
+    const speechRateRef = useRef<number>(0.8);
+    const audioLoopTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+    speechRateRef.current = speechRate;
     savedQuestionsRef.current = savedQuestions;
     activeAudioIndexRef.current = activeAudioIndex;
 
@@ -587,6 +764,9 @@ export default function ScannerApp() {
         const storedPrompt = localStorage.getItem("scannerApp_solvePrompt");
         if (storedPrompt) setCustomSolvePrompt(storedPrompt);
 
+        const storedTranscribePrompt = localStorage.getItem("scannerApp_transcribePrompt");
+        if (storedTranscribePrompt) setCustomTranscribePrompt(storedTranscribePrompt);
+
         const storedOrder = localStorage.getItem("scannerApp_imageSolveProviderOrder");
         if (storedOrder) {
             try {
@@ -619,6 +799,8 @@ export default function ScannerApp() {
             getSharedAudioContext();
             getBoopAudio();
             getCancelAudio();
+            getTranscribeStartAudio();
+            getTranscribeDoneAudio();
         };
         window.addEventListener("pointerdown", unlockAudio, { once: true });
         window.addEventListener("click", unlockAudio, { once: true });
@@ -641,10 +823,11 @@ export default function ScannerApp() {
         if (isLoaded) {
             localStorage.setItem("scannerApp_savedQuestions", JSON.stringify(savedQuestions));
             localStorage.setItem("scannerApp_solvePrompt", customSolvePrompt);
+            localStorage.setItem("scannerApp_transcribePrompt", customTranscribePrompt);
             localStorage.setItem("scannerApp_imageSolveProviderOrder", JSON.stringify(imageSolveProviderOrder));
             localStorage.setItem("scannerApp_imageSolveProviderEnabled", JSON.stringify(imageSolveProviderEnabled));
         }
-    }, [savedQuestions, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, isLoaded]);
+    }, [savedQuestions, customSolvePrompt, customTranscribePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, isLoaded]);
 
     // ── Load image solve history ──────────────────────────────────────────────
     const fetchHistory = useCallback(async () => {
@@ -848,6 +1031,11 @@ export default function ScannerApp() {
         // Invalidate any active or in-flight transcribe / audio requests
         audioPlayTokenRef.current += 1;
 
+        if (audioLoopTimerRef.current) {
+            clearTimeout(audioLoopTimerRef.current);
+            audioLoopTimerRef.current = null;
+        }
+
         if (currentAudioRef.current) {
             try {
                 currentAudioRef.current.pause();
@@ -861,20 +1049,31 @@ export default function ScannerApp() {
                 window.speechSynthesis.cancel();
             } catch { }
         }
+        speechUtteranceRef.current = null;
         setIsAudioPlaying(false);
     }, []);
 
-    const playBrowserSpeechFallback = useCallback((text: string) => {
+    const playBrowserSpeechFallback = useCallback((text: string, questionNumStr?: string) => {
         if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
         try {
+            if (audioLoopTimerRef.current) {
+                clearTimeout(audioLoopTimerRef.current);
+                audioLoopTimerRef.current = null;
+            }
             window.speechSynthesis.cancel();
+            const currentToken = audioPlayTokenRef.current;
             const utterance = new SpeechSynthesisUtterance(text);
-            utterance.rate = speechRate;
+            utterance.rate = speechRateRef.current;
             utterance.onend = () => {
+                if (audioPlayTokenRef.current !== currentToken) return;
                 if (isLoopingRef.current) {
-                    setTimeout(() => {
-                        try { window.speechSynthesis.speak(utterance); } catch { }
-                    }, 400);
+                    setAudioStatusMessage(questionNumStr ? `Question ${questionNumStr} complete. Repeating in 2s...` : "Repeating in 2s...");
+                    audioLoopTimerRef.current = setTimeout(() => {
+                        if (audioPlayTokenRef.current !== currentToken) return;
+                        playBrowserSpeechFallback(text, questionNumStr);
+                    }, 1800);
+                } else {
+                    setIsAudioPlaying(false);
                 }
             };
             speechUtteranceRef.current = utterance;
@@ -883,12 +1082,14 @@ export default function ScannerApp() {
         } catch (e) {
             console.warn("Speech synthesis fallback failed:", e);
         }
-    }, [speechRate]);
+    }, []);
 
     const changeSpeechRate = useCallback((newRate: number) => {
         const clamped = Math.max(0.5, Math.min(1.5, Math.round(newRate * 100) / 100));
         setSpeechRate(clamped);
+        speechRateRef.current = clamped;
         if (currentAudioRef.current) {
+            currentAudioRef.current.defaultPlaybackRate = clamped;
             currentAudioRef.current.playbackRate = clamped;
         }
         if (speechUtteranceRef.current && typeof window !== "undefined" && "speechSynthesis" in window) {
@@ -928,6 +1129,7 @@ export default function ScannerApp() {
                             solutionText: q.solution,
                             questionNumber: q.questionNumber || String(nextIdx + 1),
                             speed: speechRate,
+                            transcribePrompt: customTranscribePromptRef.current,
                         }),
                     });
                     if (!res.ok) throw new Error("Prefetch failed");
@@ -972,6 +1174,12 @@ export default function ScannerApp() {
         setActiveAudioIndex(boundedIndex);
         setAudioStatusMessage(`Preparing Question ${targetQ.questionNumber || boundedIndex + 1}...`);
 
+        // Clear any pending loop repeat timer
+        if (audioLoopTimerRef.current) {
+            clearTimeout(audioLoopTimerRef.current);
+            audioLoopTimerRef.current = null;
+        }
+
         // Stop any currently playing audio immediately
         if (currentAudioRef.current) {
             try {
@@ -985,6 +1193,7 @@ export default function ScannerApp() {
         setIsAudioPlaying(false);
 
         try {
+            const wasJustTranscribed = !audioDataCacheRef.current.has(targetQ.id);
             let cached = audioDataCacheRef.current.get(targetQ.id);
             if (!cached) {
                 let dataPromise = inFlightTranscribeRef.current.get(targetQ.id);
@@ -997,7 +1206,8 @@ export default function ScannerApp() {
                                 questionText: targetQ.text,
                                 solutionText: targetQ.solution,
                                 questionNumber: targetQ.questionNumber || String(boundedIndex + 1),
-                                speed: speechRate,
+                                speed: speechRateRef.current,
+                                transcribePrompt: customTranscribePromptRef.current,
                             }),
                         });
 
@@ -1035,6 +1245,11 @@ export default function ScannerApp() {
                 return;
             }
 
+            // Play distinct completion chime when transcription finishes processing
+            if (wasJustTranscribed) {
+                playTranscribeDoneSound();
+            }
+
             // Extra safeguard: Stop again right before playback
             if (currentAudioRef.current) {
                 try {
@@ -1046,6 +1261,8 @@ export default function ScannerApp() {
                 try { window.speechSynthesis.cancel(); } catch { }
             }
 
+            const qNumStr = String(targetQ.questionNumber || boundedIndex + 1);
+
             if (cached.audioDataUrl) {
                 let audio = currentAudioRef.current;
                 if (!audio) {
@@ -1055,18 +1272,53 @@ export default function ScannerApp() {
 
                 audio.pause();
                 audio.src = cached.audioDataUrl;
-                audio.loop = true;
-                audio.playbackRate = speechRate;
+                audio.loop = false; // Never native 0ms loop; we inject a deliberate 1.8s pause
+                audio.defaultPlaybackRate = speechRateRef.current;
+                audio.playbackRate = speechRateRef.current;
+
                 audio.onplay = () => {
-                    if (audioPlayTokenRef.current === currentToken) setIsAudioPlaying(true);
+                    if (audioPlayTokenRef.current === currentToken) {
+                        setIsAudioPlaying(true);
+                        if (audio && audio.playbackRate !== speechRateRef.current) {
+                            audio.playbackRate = speechRateRef.current;
+                        }
+                    }
                 };
+
                 audio.onpause = () => {
                     if (audioPlayTokenRef.current === currentToken) setIsAudioPlaying(false);
                 };
+
+                audio.onended = () => {
+                    if (audioPlayTokenRef.current !== currentToken) return;
+                    if (isLoopingRef.current) {
+                        setAudioStatusMessage(`Question ${qNumStr} complete. Repeating in 2s...`);
+                        if (audioLoopTimerRef.current) clearTimeout(audioLoopTimerRef.current);
+                        audioLoopTimerRef.current = setTimeout(async () => {
+                            if (audioPlayTokenRef.current !== currentToken) return;
+                            try {
+                                if (currentAudioRef.current) {
+                                    currentAudioRef.current.currentTime = 0;
+                                    currentAudioRef.current.defaultPlaybackRate = speechRateRef.current;
+                                    currentAudioRef.current.playbackRate = speechRateRef.current;
+                                    await currentAudioRef.current.play();
+                                    setIsAudioPlaying(true);
+                                    setAudioStatusMessage(`Playing Question ${qNumStr} (Looping, ${speechRateRef.current}x)`);
+                                }
+                            } catch (e) {
+                                console.warn("Audio loop replay failed:", e);
+                            }
+                        }, 1800);
+                    } else {
+                        setIsAudioPlaying(false);
+                        setAudioStatusMessage(`Question ${qNumStr} finished.`);
+                    }
+                };
+
                 audio.onerror = () => {
                     if (audioPlayTokenRef.current === currentToken) {
                         console.warn("Audio element error. Falling back to browser speech synthesis.");
-                        playBrowserSpeechFallback(cached!.spokenText);
+                        playBrowserSpeechFallback(cached!.spokenText, qNumStr);
                     }
                 };
 
@@ -1074,20 +1326,20 @@ export default function ScannerApp() {
                     await audio.play();
                     if (audioPlayTokenRef.current === currentToken) {
                         setIsAudioPlaying(true);
-                        setAudioStatusMessage(`Playing Question ${targetQ.questionNumber || boundedIndex + 1} (Looping, ${speechRate}x)`);
+                        setAudioStatusMessage(`Playing Question ${qNumStr} (Looping, ${speechRateRef.current}x)`);
                     }
                 } catch (playErr: any) {
                     console.warn("audio.play() error:", playErr);
                     if (playErr.name === "NotAllowedError") {
-                        setAudioStatusMessage(`Tap ▶️ Play to listen to Question ${targetQ.questionNumber || boundedIndex + 1}`);
+                        setAudioStatusMessage(`Tap ▶️ Play to listen to Question ${qNumStr}`);
                     } else {
-                        playBrowserSpeechFallback(cached.spokenText);
-                        setAudioStatusMessage(`Playing Question ${targetQ.questionNumber || boundedIndex + 1} (Browser Speech, Looping, ${speechRate}x)`);
+                        playBrowserSpeechFallback(cached.spokenText, qNumStr);
+                        setAudioStatusMessage(`Playing Question ${qNumStr} (Browser Speech, Looping, ${speechRateRef.current}x)`);
                     }
                 }
             } else {
-                playBrowserSpeechFallback(cached.spokenText);
-                setAudioStatusMessage(`Playing Question ${targetQ.questionNumber || boundedIndex + 1} (Browser Speech, Looping, ${speechRate}x)`);
+                playBrowserSpeechFallback(cached.spokenText, qNumStr);
+                setAudioStatusMessage(`Playing Question ${qNumStr} (Browser Speech, Looping, ${speechRateRef.current}x)`);
             }
 
             // Trigger background prefetch for remaining questions
@@ -1134,6 +1386,9 @@ export default function ScannerApp() {
             setExpandedSolutionIds(new Set(questionsToSolve.map(q => q.id)));
 
             if (solvedList.length > 0) {
+                // Play distinct sound right after problem is solved and it goes for transcript
+                playTranscribeStartSound();
+
                 // 1. Spoken audio playback (Question 1 starts looping immediately, rest prefetch)
                 playQuestionAudio(0, solvedList);
 
@@ -1171,8 +1426,22 @@ export default function ScannerApp() {
     }, [customSolvePrompt, playQuestionAudio]);
 
     const toggleAudioPlayPause = useCallback(() => {
+        // If paused during the 1.8s loop pause interval, cancel the scheduled replay
+        if (audioLoopTimerRef.current) {
+            clearTimeout(audioLoopTimerRef.current);
+            audioLoopTimerRef.current = null;
+            setIsAudioPlaying(false);
+            setAudioStatusMessage("Audio paused.");
+            return;
+        }
+
         if (currentAudioRef.current) {
             if (currentAudioRef.current.paused) {
+                if (currentAudioRef.current.ended) {
+                    currentAudioRef.current.currentTime = 0;
+                }
+                currentAudioRef.current.defaultPlaybackRate = speechRateRef.current;
+                currentAudioRef.current.playbackRate = speechRateRef.current;
                 currentAudioRef.current.play().catch(() => {});
                 setIsAudioPlaying(true);
             } else {
@@ -2699,26 +2968,90 @@ export default function ScannerApp() {
             {/* Settings Overlay */}
             {isSettingsOpen && (
                 <div className="settings-overlay" onClick={() => setIsSettingsOpen(false)}>
-                    <div className="settings-modal" onClick={e => e.stopPropagation()}>
+                    <div className="settings-modal" style={{ maxWidth: "640px", maxHeight: "88vh" }} onClick={e => e.stopPropagation()}>
                         <div className="settings-header">
-                            <h3>Settings</h3>
+                            <h3>Settings & Prompt Rules</h3>
                             <button className="close-btn" onClick={() => setIsSettingsOpen(false)}>✕</button>
                         </div>
-                        <div className="settings-content">
-                            <label className="settings-label">
-                                AI Solve System Prompt
-                                <span className="settings-hint">The JSON formatting instructions will be appended automatically.</span>
-                            </label>
-                            <textarea
-                                className="settings-textarea"
-                                value={customSolvePrompt}
-                                onChange={(e) => setCustomSolvePrompt(e.target.value)}
-                                placeholder={defaultSolvePrompt}
-                            />
-                            <div className="settings-actions">
-                                <button className="reset-btn" onClick={() => setCustomSolvePrompt(defaultSolvePrompt)}>Reset Default</button>
-                                <button className="process-btn" onClick={() => setIsSettingsOpen(false)}>Done</button>
-                            </div>
+
+                        {/* Prompt Selector Tabs */}
+                        <div style={{ display: "flex", gap: "0.5rem", padding: "1rem 1.5rem 0", borderBottom: "1px solid hsla(0, 0%, 100%, 0.1)" }}>
+                            <button
+                                className={`tab-btn ${settingsTab === "solve" ? "active" : ""}`}
+                                onClick={() => setSettingsTab("solve")}
+                                style={{ flex: 1, padding: "0.5rem 0.75rem", borderRadius: "8px 8px 0 0", fontWeight: 600, fontSize: "0.85rem" }}
+                            >
+                                📝 AI Solve Prompt
+                            </button>
+                            <button
+                                className={`tab-btn ${settingsTab === "transcribe" ? "active" : ""}`}
+                                onClick={() => setSettingsTab("transcribe")}
+                                style={{ flex: 1, padding: "0.5rem 0.75rem", borderRadius: "8px 8px 0 0", fontWeight: 600, fontSize: "0.85rem" }}
+                            >
+                                🎙️ Transcribe Rules
+                            </button>
+                        </div>
+
+                        <div className="settings-content" style={{ overflowY: "auto", flex: 1, padding: "1.25rem 1.5rem" }}>
+                            {settingsTab === "solve" ? (
+                                <>
+                                    <label className="settings-label">
+                                        AI Solve System Prompt
+                                        <span className="settings-hint">
+                                            Defines how AI models solve the scanned questions. JSON formatting instructions are appended automatically.
+                                        </span>
+                                    </label>
+                                    <textarea
+                                        className="settings-textarea"
+                                        style={{ minHeight: "260px", fontFamily: "monospace", fontSize: "0.85rem", lineHeight: "1.4" }}
+                                        value={customSolvePrompt}
+                                        onChange={(e) => setCustomSolvePrompt(e.target.value)}
+                                        placeholder={defaultSolvePrompt}
+                                    />
+                                    <div className="settings-actions">
+                                        <button className="reset-btn" onClick={() => setCustomSolvePrompt(defaultSolvePrompt)}>
+                                            Reset Default
+                                        </button>
+                                        <button className="process-btn" onClick={() => setIsSettingsOpen(false)}>
+                                            Done
+                                        </button>
+                                    </div>
+                                </>
+                            ) : (
+                                <>
+                                    <label className="settings-label">
+                                        Transcript Solution Encoder Rules (TTS Prompt)
+                                        <span className="settings-hint">
+                                            Define the exact rules and guidelines used by the AI to convert written solutions into spoken dictation. Deepgram TTS speaks according to these rules.
+                                        </span>
+                                    </label>
+                                    <textarea
+                                        className="settings-textarea"
+                                        style={{ minHeight: "300px", fontFamily: "monospace", fontSize: "0.82rem", lineHeight: "1.4" }}
+                                        value={customTranscribePrompt}
+                                        onChange={(e) => {
+                                            const val = e.target.value;
+                                            setCustomTranscribePrompt(val);
+                                            audioDataCacheRef.current.clear();
+                                        }}
+                                        placeholder={defaultTranscribePrompt}
+                                    />
+                                    <div className="settings-actions">
+                                        <button
+                                            className="reset-btn"
+                                            onClick={() => {
+                                                setCustomTranscribePrompt(defaultTranscribePrompt);
+                                                audioDataCacheRef.current.clear();
+                                            }}
+                                        >
+                                            Reset Default
+                                        </button>
+                                        <button className="process-btn" onClick={() => setIsSettingsOpen(false)}>
+                                            Done
+                                        </button>
+                                    </div>
+                                </>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -2871,9 +3204,17 @@ export default function ScannerApp() {
                                         ✍️ Paced Pauses
                                     </span>
                                     <span className="audio-loop-badge" style={{ background: "hsla(140, 70%, 40%, 0.2)", color: "hsl(140, 80%, 65%)", borderColor: "hsla(140, 70%, 40%, 0.35)" }}>
-                                        💬 WhatsApp: 190ch/5s
+                                        💬 WhatsApp: 120ch/5s
                                     </span>
                                     <span className="audio-loop-badge">🔁 Looping</span>
+                                    <button
+                                        className="audio-loop-badge"
+                                        onClick={() => { setSettingsTab("transcribe"); setIsSettingsOpen(true); }}
+                                        style={{ background: "hsla(280, 70%, 40%, 0.25)", color: "hsl(280, 80%, 75%)", borderColor: "hsla(280, 70%, 40%, 0.4)", cursor: "pointer" }}
+                                        title="Customize Spoken Transcribe Rules"
+                                    >
+                                        ⚙️ Rules
+                                    </button>
                                 </div>
                             </div>
 
