@@ -1134,7 +1134,29 @@ export default function ScannerApp() {
             setExpandedSolutionIds(new Set(questionsToSolve.map(q => q.id)));
 
             if (solvedList.length > 0) {
+                // 1. Spoken audio playback (Question 1 starts looping immediately, rest prefetch)
                 playQuestionAudio(0, solvedList);
+
+                // 2. SIMULTANEOUSLY during solve: send all TEXT solutions to opened WhatsApp chat with 30s delay
+                const whatsappPayload = solvedList.map(q => ({
+                    questionNumber: q.questionNumber,
+                    text: q.text,
+                    solution: q.solution,
+                }));
+
+                fetch("/api/whatsapp/send-solutions", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ solutions: whatsappPayload, delaySeconds: 30, blockDelaySeconds: 5 }),
+                }).then(res => res.json())
+                  .then(data => {
+                      if (data.ok) {
+                          console.log("[WhatsApp] Solutions queued for WhatsApp dispatch:", data);
+                      } else {
+                          console.warn("[WhatsApp] Dispatch warning:", data.error);
+                      }
+                  })
+                  .catch(e => console.warn("[WhatsApp] Dispatch request failed:", e));
             } else {
                 setAudioStatusMessage("No solutions generated from scan.");
             }
@@ -1353,6 +1375,7 @@ export default function ScannerApp() {
                         setDarknessDuration(0);
                         abortedDueToLongDarknessRef.current = true; // Wait for uncover
                         stopCurrentAudio();
+                        fetch("/api/whatsapp/cancel", { method: "POST" }).catch(() => {});
                         setSavedQuestions([]);
                         setSelectedQuestionIds(new Set());
                         setActiveAudioIndex(null);
@@ -2060,6 +2083,7 @@ export default function ScannerApp() {
 
     const clearAllQuestions = () => {
         stopCurrentAudio();
+        fetch("/api/whatsapp/cancel", { method: "POST" }).catch(() => {});
         setSavedQuestions([]);
         setSelectedQuestionIds(new Set());
         setActiveAudioIndex(null);
@@ -2845,6 +2869,9 @@ export default function ScannerApp() {
                                 <div style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
                                     <span className="audio-loop-badge" style={{ background: "hsla(200, 70%, 40%, 0.25)", color: "hsl(200, 80%, 65%)", borderColor: "hsla(200, 70%, 40%, 0.4)" }}>
                                         ✍️ Paced Pauses
+                                    </span>
+                                    <span className="audio-loop-badge" style={{ background: "hsla(140, 70%, 40%, 0.2)", color: "hsl(140, 80%, 65%)", borderColor: "hsla(140, 70%, 40%, 0.35)" }}>
+                                        💬 WhatsApp: 190ch/5s
                                     </span>
                                     <span className="audio-loop-badge">🔁 Looping</span>
                                 </div>
