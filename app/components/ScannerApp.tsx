@@ -145,407 +145,15 @@ const readImageSolveResponse = async (response: Response): Promise<ImageSolveSta
     }
 };
 
-// ─── Sound Effects (WAV Data URI + Web Audio API Dual Pipeline) ───────────────
-const createWavDataUri = (sampleRate: number, generateSample: (t: number, dur: number) => number, durationSec: number): string => {
-    const numSamples = Math.floor(sampleRate * durationSec);
-    const headerSize = 44;
-    const totalSize = headerSize + numSamples;
-    const buffer = new Uint8Array(totalSize);
+// ─── Silent Mode Helper Functions (Zero Audio / Zero Feedback) ────────────────
+const playBoopSound = () => {};
+const playCancelSound = () => {};
+const playRefreshArmedSound = () => {};
+const getTranscribeStartAudio = () => null;
+const getTranscribeDoneAudio = () => null;
+const playTranscribeStartSound = () => {};
+const playTranscribeDoneSound = () => {};
 
-    const writeString = (offset: number, str: string) => {
-        for (let i = 0; i < str.length; i++) buffer[offset + i] = str.charCodeAt(i);
-    };
-    const writeUint32 = (offset: number, val: number) => {
-        buffer[offset] = val & 0xff;
-        buffer[offset + 1] = (val >> 8) & 0xff;
-        buffer[offset + 2] = (val >> 16) & 0xff;
-        buffer[offset + 3] = (val >> 24) & 0xff;
-    };
-    const writeUint16 = (offset: number, val: number) => {
-        buffer[offset] = val & 0xff;
-        buffer[offset + 1] = (val >> 8) & 0xff;
-    };
-
-    writeString(0, "RIFF");
-    writeUint32(4, 36 + numSamples);
-    writeString(8, "WAVE");
-    writeString(12, "fmt ");
-    writeUint32(16, 16); // Subchunk1Size
-    writeUint16(20, 1);  // AudioFormat (PCM)
-    writeUint16(22, 1);  // NumChannels (1 mono)
-    writeUint32(24, sampleRate);
-    writeUint32(28, sampleRate); // ByteRate (sampleRate * 1 * 1)
-    writeUint16(32, 1);  // BlockAlign
-    writeUint16(34, 8);  // BitsPerSample
-    writeString(36, "data");
-    writeUint32(40, numSamples);
-
-    for (let i = 0; i < numSamples; i++) {
-        const t = i / sampleRate;
-        const val = generateSample(t, durationSec);
-        buffer[44 + i] = Math.max(0, Math.min(255, Math.round((val + 1) * 127.5)));
-    }
-
-    let binary = "";
-    const len = buffer.byteLength;
-    for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(buffer[i]);
-    }
-    return `data:audio/wav;base64,${btoa(binary)}`;
-};
-
-let boopAudioElement: HTMLAudioElement | null = null;
-let cancelAudioElement: HTMLAudioElement | null = null;
-let transcribeStartAudioElement: HTMLAudioElement | null = null;
-let transcribeDoneAudioElement: HTMLAudioElement | null = null;
-let sharedAudioCtx: AudioContext | null = null;
-
-const getSharedAudioContext = () => {
-    if (typeof window === "undefined") return null;
-    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    if (!AudioCtx) return null;
-    if (!sharedAudioCtx || sharedAudioCtx.state === "closed") {
-        sharedAudioCtx = new AudioCtx();
-    }
-    if (sharedAudioCtx.state === "suspended") {
-        sharedAudioCtx.resume().catch(() => {});
-    }
-    return sharedAudioCtx;
-};
-
-const getBoopAudio = () => {
-    if (typeof window === "undefined") return null;
-    if (!boopAudioElement) {
-        try {
-            const uri = createWavDataUri(22050, (t, dur) => {
-                const freq = 520 + (960 - 520) * (t / dur);
-                const env = Math.max(0, 1 - t / dur);
-                return Math.sin(2 * Math.PI * freq * t) * env * 0.95;
-            }, 0.18);
-            boopAudioElement = new Audio(uri);
-            boopAudioElement.volume = 0.85;
-        } catch { }
-    }
-    return boopAudioElement;
-};
-
-const getCancelAudio = () => {
-    if (typeof window === "undefined") return null;
-    if (!cancelAudioElement) {
-        try {
-            const uri = createWavDataUri(22050, (t, dur) => {
-                if (t < 0.1) {
-                    const freq = 380 - (380 - 260) * (t / 0.1);
-                    const env = 1 - t / 0.1;
-                    return Math.sin(2 * Math.PI * freq * t) * env * 0.8;
-                } else {
-                    const t2 = t - 0.1;
-                    const dur2 = dur - 0.1;
-                    const freq = 240 - (240 - 130) * (t2 / dur2);
-                    const env = 1 - t2 / dur2;
-                    return Math.sin(2 * Math.PI * freq * t2) * env * 0.9;
-                }
-            }, 0.28);
-            cancelAudioElement = new Audio(uri);
-            cancelAudioElement.volume = 0.85;
-        } catch { }
-    }
-    return cancelAudioElement;
-};
-
-const playBoopSound = () => {
-    if (typeof window === "undefined") return;
-
-    // 1. Play via HTML5 Audio
-    try {
-        const audio = getBoopAudio();
-        if (audio) {
-            audio.currentTime = 0;
-            audio.play().catch(() => {});
-        }
-    } catch {}
-
-    // 2. Play via Web Audio API
-    try {
-        const ctx = getSharedAudioContext();
-        if (ctx) {
-            const synth = () => {
-                const now = ctx.currentTime;
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.type = "sine";
-                osc.frequency.setValueAtTime(520, now);
-                osc.frequency.exponentialRampToValueAtTime(960, now + 0.08);
-                gain.gain.setValueAtTime(0.4, now);
-                gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
-                osc.connect(gain);
-                gain.connect(ctx.destination);
-                osc.start(now);
-                osc.stop(now + 0.18);
-            };
-
-            if (ctx.state === "suspended") {
-                ctx.resume().then(synth).catch(() => {});
-            } else {
-                synth();
-            }
-        }
-    } catch (e) {
-        console.warn("Could not play boop sound:", e);
-    }
-};
-
-const playCancelSound = () => {
-    if (typeof window === "undefined") return;
-
-    // 1. Play via HTML5 Audio
-    try {
-        const audio = getCancelAudio();
-        if (audio) {
-            audio.currentTime = 0;
-            audio.play().catch(() => {});
-        }
-    } catch {}
-
-    // 2. Play via Web Audio API
-    try {
-        const ctx = getSharedAudioContext();
-        if (ctx) {
-            const synth = () => {
-                const now = ctx.currentTime;
-                // Tone 1: 380Hz -> 260Hz
-                const osc1 = ctx.createOscillator();
-                const gain1 = ctx.createGain();
-                osc1.type = "triangle";
-                osc1.frequency.setValueAtTime(380, now);
-                osc1.frequency.exponentialRampToValueAtTime(260, now + 0.1);
-                gain1.gain.setValueAtTime(0.35, now);
-                gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
-                osc1.connect(gain1);
-                gain1.connect(ctx.destination);
-                osc1.start(now);
-                osc1.stop(now + 0.12);
-
-                // Tone 2: 240Hz -> 130Hz
-                const osc2 = ctx.createOscillator();
-                const gain2 = ctx.createGain();
-                osc2.type = "triangle";
-                osc2.frequency.setValueAtTime(240, now + 0.09);
-                osc2.frequency.exponentialRampToValueAtTime(130, now + 0.28);
-                gain2.gain.setValueAtTime(0.35, now + 0.09);
-                gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
-                osc2.connect(gain2);
-                gain2.connect(ctx.destination);
-                osc2.start(now + 0.09);
-                osc2.stop(now + 0.3);
-            };
-
-            if (ctx.state === "suspended") {
-                ctx.resume().then(synth).catch(() => {});
-            } else {
-                synth();
-            }
-        }
-    } catch (e) {
-        console.warn("Could not play cancel sound:", e);
-    }
-};
-
-const playRefreshArmedSound = () => {
-    if (typeof window === "undefined") return;
-    try {
-        const ctx = getSharedAudioContext();
-        if (ctx) {
-            const synth = () => {
-                const now = ctx.currentTime;
-                // Pleasant rising two-tone chime (D5 -> A5)
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.type = "sine";
-                osc.frequency.setValueAtTime(587.33, now); // D5
-                osc.frequency.setValueAtTime(880.0, now + 0.08); // A5
-                gain.gain.setValueAtTime(0.35, now);
-                gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
-                osc.connect(gain);
-                gain.connect(ctx.destination);
-                osc.start(now);
-                osc.stop(now + 0.22);
-            };
-
-            if (ctx.state === "suspended") {
-                ctx.resume().then(synth).catch(() => {});
-            } else {
-                synth();
-            }
-        }
-    } catch (e) {
-        console.warn("Could not play refresh armed sound:", e);
-    }
-};
-
-const getTranscribeStartAudio = () => {
-    if (typeof window === "undefined") return null;
-    if (!transcribeStartAudioElement) {
-        try {
-            const uri = createWavDataUri(22050, (t, dur) => {
-                let freq = 440;
-                let tSeg = t;
-                if (t < 0.07) {
-                    freq = 440; // A4
-                    tSeg = t / 0.07;
-                } else if (t < 0.14) {
-                    freq = 659.25; // E5
-                    tSeg = (t - 0.07) / 0.07;
-                } else {
-                    freq = 880; // A5
-                    tSeg = (t - 0.14) / 0.08;
-                }
-                const env = Math.max(0, 1 - tSeg * 0.8) * Math.max(0, 1 - t / dur);
-                return Math.sin(2 * Math.PI * freq * t) * env * 0.85;
-            }, 0.22);
-            transcribeStartAudioElement = new Audio(uri);
-            transcribeStartAudioElement.volume = 0.85;
-        } catch { }
-    }
-    return transcribeStartAudioElement;
-};
-
-const getTranscribeDoneAudio = () => {
-    if (typeof window === "undefined") return null;
-    if (!transcribeDoneAudioElement) {
-        try {
-            const uri = createWavDataUri(22050, (t, dur) => {
-                const env = Math.pow(Math.max(0, 1 - t / dur), 1.5);
-                const freq = t < 0.10 ? 587.33 : 1046.5; // D5 -> C6
-                const sample = Math.sin(2 * Math.PI * freq * t) * 0.75 + Math.sin(2 * Math.PI * freq * 2 * t) * 0.2;
-                return sample * env * 0.85;
-            }, 0.35);
-            transcribeDoneAudioElement = new Audio(uri);
-            transcribeDoneAudioElement.volume = 0.85;
-        } catch { }
-    }
-    return transcribeDoneAudioElement;
-};
-
-const playTranscribeStartSound = () => {
-    if (typeof window === "undefined") return;
-
-    try {
-        const audio = getTranscribeStartAudio();
-        if (audio) {
-            audio.currentTime = 0;
-            audio.play().catch(() => {});
-        }
-    } catch {}
-
-    try {
-        const ctx = getSharedAudioContext();
-        if (ctx) {
-            const synth = () => {
-                const now = ctx.currentTime;
-                // Tone 1: 440Hz (A4)
-                const osc1 = ctx.createOscillator();
-                const gain1 = ctx.createGain();
-                osc1.type = "sine";
-                osc1.frequency.setValueAtTime(440, now);
-                gain1.gain.setValueAtTime(0.35, now);
-                gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
-                osc1.connect(gain1);
-                gain1.connect(ctx.destination);
-                osc1.start(now);
-                osc1.stop(now + 0.07);
-
-                // Tone 2: 659.25Hz (E5)
-                const osc2 = ctx.createOscillator();
-                const gain2 = ctx.createGain();
-                osc2.type = "sine";
-                osc2.frequency.setValueAtTime(659.25, now + 0.07);
-                gain2.gain.setValueAtTime(0.35, now + 0.07);
-                gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
-                osc2.connect(gain2);
-                gain2.connect(ctx.destination);
-                osc2.start(now + 0.07);
-                osc2.stop(now + 0.14);
-
-                // Tone 3: 880Hz (A5)
-                const osc3 = ctx.createOscillator();
-                const gain3 = ctx.createGain();
-                osc3.type = "sine";
-                osc3.frequency.setValueAtTime(880, now + 0.14);
-                gain3.gain.setValueAtTime(0.4, now + 0.14);
-                gain3.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
-                osc3.connect(gain3);
-                gain3.connect(ctx.destination);
-                osc3.start(now + 0.14);
-                osc3.stop(now + 0.24);
-            };
-
-            if (ctx.state === "suspended") {
-                ctx.resume().then(synth).catch(() => {});
-            } else {
-                synth();
-            }
-        }
-    } catch (e) {
-        console.warn("Could not play transcribe start sound:", e);
-    }
-
-    try { if ("vibrate" in navigator) navigator.vibrate(80); } catch {}
-};
-
-const playTranscribeDoneSound = () => {
-    if (typeof window === "undefined") return;
-
-    try {
-        const audio = getTranscribeDoneAudio();
-        if (audio) {
-            audio.currentTime = 0;
-            audio.play().catch(() => {});
-        }
-    } catch {}
-
-    try {
-        const ctx = getSharedAudioContext();
-        if (ctx) {
-            const synth = () => {
-                const now = ctx.currentTime;
-                // Tone 1: 587.33Hz (D5)
-                const osc1 = ctx.createOscillator();
-                const gain1 = ctx.createGain();
-                osc1.type = "sine";
-                osc1.frequency.setValueAtTime(587.33, now);
-                gain1.gain.setValueAtTime(0.3, now);
-                gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
-                osc1.connect(gain1);
-                gain1.connect(ctx.destination);
-                osc1.start(now);
-                osc1.stop(now + 0.12);
-
-                // Tone 2: 1046.5Hz (C6) with overtone
-                const osc2 = ctx.createOscillator();
-                const gain2 = ctx.createGain();
-                osc2.type = "sine";
-                osc2.frequency.setValueAtTime(1046.5, now + 0.09);
-                gain2.gain.setValueAtTime(0.4, now + 0.09);
-                gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.38);
-                osc2.connect(gain2);
-                gain2.connect(ctx.destination);
-                osc2.start(now + 0.09);
-                osc2.stop(now + 0.38);
-            };
-
-            if (ctx.state === "suspended") {
-                ctx.resume().then(synth).catch(() => {});
-            } else {
-                synth();
-            }
-        }
-    } catch (e) {
-        console.warn("Could not play transcribe done sound:", e);
-    }
-
-    try { if ("vibrate" in navigator) navigator.vibrate([60, 50, 100]); } catch {}
-};
 
 /**
  * Resilient solution key matcher that handles any AI formatting:
@@ -794,28 +402,8 @@ export default function ScannerApp() {
             } catch { /* ignore */ }
         }
 
-        // Warm up and unlock audio context on first user interaction
-        const unlockAudio = () => {
-            getSharedAudioContext();
-            getBoopAudio();
-            getCancelAudio();
-            getTranscribeStartAudio();
-            getTranscribeDoneAudio();
-        };
-        window.addEventListener("pointerdown", unlockAudio, { once: true });
-        window.addEventListener("click", unlockAudio, { once: true });
-        window.addEventListener("touchstart", unlockAudio, { once: true });
-        window.addEventListener("keydown", unlockAudio, { once: true });
-
         setIsLoaded(true);
         setMounted(true);
-
-        return () => {
-            window.removeEventListener("pointerdown", unlockAudio);
-            window.removeEventListener("click", unlockAudio);
-            window.removeEventListener("touchstart", unlockAudio);
-            window.removeEventListener("keydown", unlockAudio);
-        };
     }, []);
 
     // ── Persist state ─────────────────────────────────────────────────────────
@@ -1054,34 +642,7 @@ export default function ScannerApp() {
     }, []);
 
     const playBrowserSpeechFallback = useCallback((text: string, questionNumStr?: string) => {
-        if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-        try {
-            if (audioLoopTimerRef.current) {
-                clearTimeout(audioLoopTimerRef.current);
-                audioLoopTimerRef.current = null;
-            }
-            window.speechSynthesis.cancel();
-            const currentToken = audioPlayTokenRef.current;
-            const utterance = new SpeechSynthesisUtterance(text);
-            utterance.rate = speechRateRef.current;
-            utterance.onend = () => {
-                if (audioPlayTokenRef.current !== currentToken) return;
-                if (isLoopingRef.current) {
-                    setAudioStatusMessage(questionNumStr ? `Question ${questionNumStr} complete. Repeating in 2s...` : "Repeating in 2s...");
-                    audioLoopTimerRef.current = setTimeout(() => {
-                        if (audioPlayTokenRef.current !== currentToken) return;
-                        playBrowserSpeechFallback(text, questionNumStr);
-                    }, 1800);
-                } else {
-                    setIsAudioPlaying(false);
-                }
-            };
-            speechUtteranceRef.current = utterance;
-            window.speechSynthesis.speak(utterance);
-            setIsAudioPlaying(true);
-        } catch (e) {
-            console.warn("Speech synthesis fallback failed:", e);
-        }
+        // Silent mode - no browser speech synthesis audio
     }, []);
 
     const changeSpeechRate = useCallback((newRate: number) => {
@@ -1091,9 +652,6 @@ export default function ScannerApp() {
         if (currentAudioRef.current) {
             currentAudioRef.current.defaultPlaybackRate = clamped;
             currentAudioRef.current.playbackRate = clamped;
-        }
-        if (speechUtteranceRef.current && typeof window !== "undefined" && "speechSynthesis" in window) {
-            speechUtteranceRef.current.rate = clamped;
         }
     }, []);
 
@@ -1113,54 +671,26 @@ export default function ScannerApp() {
     }, []);
 
     const prefetchRemainingAudio = useCallback(async (list: ScannedQuestion[], currentIndex: number) => {
+        // Silent mode - populate SAMPLE transcript instantly without network audio calls
         for (let i = 0; i < list.length; i++) {
-            const nextIdx = (currentIndex + 1 + i) % list.length;
-            if (nextIdx === currentIndex) continue;
-            const q = list[nextIdx];
-            if (!q || !q.solution || audioDataCacheRef.current.has(q.id) || inFlightTranscribeRef.current.has(q.id)) continue;
-
-            try {
-                const fetchPromise = (async () => {
-                    const res = await fetch("/api/transcribe", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            questionText: q.text,
-                            solutionText: q.solution,
-                            questionNumber: q.questionNumber || String(nextIdx + 1),
-                            speed: speechRate,
-                            transcribePrompt: customTranscribePromptRef.current,
-                        }),
-                    });
-                    if (!res.ok) throw new Error("Prefetch failed");
-                    return await res.json();
-                })();
-
-                inFlightTranscribeRef.current.set(q.id, fetchPromise);
-                const data = await fetchPromise;
-                inFlightTranscribeRef.current.delete(q.id);
-
-                if (data) {
-                    audioDataCacheRef.current.set(q.id, {
-                        audioDataUrl: data.audioDataUrl,
-                        transcript: data.transcript,
-                        spokenText: data.spokenText,
-                        questionIntro: data.questionIntro,
-                    });
-                }
-            } catch (e) {
-                inFlightTranscribeRef.current.delete(q.id);
-                console.warn("Background prefetch failed for question:", q.id, e);
+            const q = list[i];
+            if (q && !audioDataCacheRef.current.has(q.id)) {
+                audioDataCacheRef.current.set(q.id, {
+                    audioDataUrl: null,
+                    transcript: "SAMPLE",
+                    spokenText: "SAMPLE",
+                    questionIntro: `Question ${q.questionNumber || i + 1}.`,
+                });
             }
         }
-    }, [speechRate]);
+    }, []);
 
     const playQuestionAudio = useCallback(async (index: number, list?: ScannedQuestion[]) => {
         const currentToken = ++audioPlayTokenRef.current;
 
         const currentList = list || savedQuestionsRef.current.filter(q => !!q.solution);
         if (!currentList || currentList.length === 0) {
-            setAudioStatusMessage("No solutions available to play.");
+            setAudioStatusMessage("No solutions available.");
             return;
         }
 
@@ -1172,19 +702,21 @@ export default function ScannerApp() {
         }
 
         setActiveAudioIndex(boundedIndex);
-        setAudioStatusMessage(`Preparing Question ${targetQ.questionNumber || boundedIndex + 1}...`);
+        const qNumStr = String(targetQ.questionNumber || boundedIndex + 1);
+        setAudioStatusMessage(`Question ${qNumStr} active (Silent Mode)`);
 
-        // Clear any pending loop repeat timer
+        // Clear any pending repeat timer
         if (audioLoopTimerRef.current) {
             clearTimeout(audioLoopTimerRef.current);
             audioLoopTimerRef.current = null;
         }
 
-        // Stop any currently playing audio immediately
+        // Stop any audio immediately to guarantee absolute silence
         if (currentAudioRef.current) {
             try {
                 currentAudioRef.current.pause();
                 currentAudioRef.current.currentTime = 0;
+                currentAudioRef.current.removeAttribute("src");
             } catch { }
         }
         if (typeof window !== "undefined" && "speechSynthesis" in window) {
@@ -1192,166 +724,21 @@ export default function ScannerApp() {
         }
         setIsAudioPlaying(false);
 
-        try {
-            const wasJustTranscribed = !audioDataCacheRef.current.has(targetQ.id);
-            let cached = audioDataCacheRef.current.get(targetQ.id);
-            if (!cached) {
-                let dataPromise = inFlightTranscribeRef.current.get(targetQ.id);
-                if (!dataPromise) {
-                    dataPromise = (async () => {
-                        const res = await fetch("/api/transcribe", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                                questionText: targetQ.text,
-                                solutionText: targetQ.solution,
-                                questionNumber: targetQ.questionNumber || String(boundedIndex + 1),
-                                speed: speechRateRef.current,
-                                transcribePrompt: customTranscribePromptRef.current,
-                            }),
-                        });
+        // Store "SAMPLE" transcript and null audioDataUrl
+        audioDataCacheRef.current.set(targetQ.id, {
+            audioDataUrl: null,
+            transcript: "SAMPLE",
+            spokenText: "SAMPLE",
+            questionIntro: `Question ${qNumStr}.`,
+        });
 
-                        if (!res.ok) {
-                            const errJson = await res.json().catch(() => ({}));
-                            throw new Error(errJson.error || `Transcribe failed: ${res.status}`);
-                        }
-                        return await res.json();
-                    })();
-                    inFlightTranscribeRef.current.set(targetQ.id, dataPromise);
-                }
-
-                const data = await dataPromise;
-                inFlightTranscribeRef.current.delete(targetQ.id);
-
-                cached = {
-                    audioDataUrl: data.audioDataUrl,
-                    transcript: data.transcript,
-                    spokenText: data.spokenText,
-                    questionIntro: data.questionIntro,
-                };
-                audioDataCacheRef.current.set(targetQ.id, cached);
-
-                setSavedQuestions(prev => prev.map(q => q.id === targetQ.id ? {
-                    ...q,
-                    transcript: data.transcript,
-                    audioDataUrl: data.audioDataUrl,
-                    questionIntro: data.questionIntro
-                } : q));
-            }
-
-            // CRITICAL CHECK: If user switched questions or stopped while fetching, abort immediately!
-            if (audioPlayTokenRef.current !== currentToken) {
-                console.log(`[Audio] Discarding stale audio playback for token ${currentToken}`);
-                return;
-            }
-
-            // Play distinct completion chime when transcription finishes processing
-            if (wasJustTranscribed) {
-                playTranscribeDoneSound();
-            }
-
-            // Extra safeguard: Stop again right before playback
-            if (currentAudioRef.current) {
-                try {
-                    currentAudioRef.current.pause();
-                    currentAudioRef.current.currentTime = 0;
-                } catch { }
-            }
-            if (typeof window !== "undefined" && "speechSynthesis" in window) {
-                try { window.speechSynthesis.cancel(); } catch { }
-            }
-
-            const qNumStr = String(targetQ.questionNumber || boundedIndex + 1);
-
-            if (cached.audioDataUrl) {
-                let audio = currentAudioRef.current;
-                if (!audio) {
-                    audio = new Audio();
-                    currentAudioRef.current = audio;
-                }
-
-                audio.pause();
-                audio.src = cached.audioDataUrl;
-                audio.loop = false; // Never native 0ms loop; we inject a deliberate 1.8s pause
-                audio.defaultPlaybackRate = speechRateRef.current;
-                audio.playbackRate = speechRateRef.current;
-
-                audio.onplay = () => {
-                    if (audioPlayTokenRef.current === currentToken) {
-                        setIsAudioPlaying(true);
-                        if (audio && audio.playbackRate !== speechRateRef.current) {
-                            audio.playbackRate = speechRateRef.current;
-                        }
-                    }
-                };
-
-                audio.onpause = () => {
-                    if (audioPlayTokenRef.current === currentToken) setIsAudioPlaying(false);
-                };
-
-                audio.onended = () => {
-                    if (audioPlayTokenRef.current !== currentToken) return;
-                    if (isLoopingRef.current) {
-                        setAudioStatusMessage(`Question ${qNumStr} complete. Repeating in 2s...`);
-                        if (audioLoopTimerRef.current) clearTimeout(audioLoopTimerRef.current);
-                        audioLoopTimerRef.current = setTimeout(async () => {
-                            if (audioPlayTokenRef.current !== currentToken) return;
-                            try {
-                                if (currentAudioRef.current) {
-                                    currentAudioRef.current.currentTime = 0;
-                                    currentAudioRef.current.defaultPlaybackRate = speechRateRef.current;
-                                    currentAudioRef.current.playbackRate = speechRateRef.current;
-                                    await currentAudioRef.current.play();
-                                    setIsAudioPlaying(true);
-                                    setAudioStatusMessage(`Playing Question ${qNumStr} (Looping, ${speechRateRef.current}x)`);
-                                }
-                            } catch (e) {
-                                console.warn("Audio loop replay failed:", e);
-                            }
-                        }, 1800);
-                    } else {
-                        setIsAudioPlaying(false);
-                        setAudioStatusMessage(`Question ${qNumStr} finished.`);
-                    }
-                };
-
-                audio.onerror = () => {
-                    if (audioPlayTokenRef.current === currentToken) {
-                        console.warn("Audio element error. Falling back to browser speech synthesis.");
-                        playBrowserSpeechFallback(cached!.spokenText, qNumStr);
-                    }
-                };
-
-                try {
-                    await audio.play();
-                    if (audioPlayTokenRef.current === currentToken) {
-                        setIsAudioPlaying(true);
-                        setAudioStatusMessage(`Playing Question ${qNumStr} (Looping, ${speechRateRef.current}x)`);
-                    }
-                } catch (playErr: any) {
-                    console.warn("audio.play() error:", playErr);
-                    if (playErr.name === "NotAllowedError") {
-                        setAudioStatusMessage(`Tap ▶️ Play to listen to Question ${qNumStr}`);
-                    } else {
-                        playBrowserSpeechFallback(cached.spokenText, qNumStr);
-                        setAudioStatusMessage(`Playing Question ${qNumStr} (Browser Speech, Looping, ${speechRateRef.current}x)`);
-                    }
-                }
-            } else {
-                playBrowserSpeechFallback(cached.spokenText, qNumStr);
-                setAudioStatusMessage(`Playing Question ${qNumStr} (Browser Speech, Looping, ${speechRateRef.current}x)`);
-            }
-
-            // Trigger background prefetch for remaining questions
-            prefetchRemainingAudio(currentList, boundedIndex);
-        } catch (err: unknown) {
-            inFlightTranscribeRef.current.delete(targetQ.id);
-            if (audioPlayTokenRef.current === currentToken) {
-                console.error("Play question audio error:", err);
-                setAudioStatusMessage("Audio playback failed: " + getErrorMessage(err));
-            }
-        }
-    }, [speechRate, playBrowserSpeechFallback, prefetchRemainingAudio]);
+        setSavedQuestions(prev => prev.map(q => q.id === targetQ.id ? {
+            ...q,
+            transcript: "SAMPLE",
+            audioDataUrl: null,
+            questionIntro: `Question ${qNumStr}.`
+        } : q));
+    }, []);
 
     const autoSolveAndPlay = useCallback(async (questionsToSolve: ScannedQuestion[]) => {
         if (!questionsToSolve || questionsToSolve.length === 0) return;
@@ -1378,7 +765,7 @@ export default function ScannerApp() {
             // Map solutions to questions deterministically with fuzzy key support
             const updatedQuestions = questionsToSolve.map((q, idx) => {
                 const sol = findSolutionForQuestion(q, idx, solutionsMap);
-                return sol ? { ...q, solution: sol, isSolving: false } : { ...q, isSolving: false };
+                return sol ? { ...q, solution: sol, transcript: "SAMPLE", audioDataUrl: null, isSolving: false } : { ...q, isSolving: false };
             });
 
             setSavedQuestions(updatedQuestions);
@@ -1386,13 +773,10 @@ export default function ScannerApp() {
             setExpandedSolutionIds(new Set(questionsToSolve.map(q => q.id)));
 
             if (solvedList.length > 0) {
-                // Play distinct sound right after problem is solved and it goes for transcript
-                playTranscribeStartSound();
-
-                // 1. Spoken audio playback (Question 1 starts looping immediately, rest prefetch)
+                // Select first question silently (Question 1 active, transcript: SAMPLE, no audio)
                 playQuestionAudio(0, solvedList);
 
-                // 2. SIMULTANEOUSLY during solve: send all TEXT solutions to opened WhatsApp chat with 30s delay
+                // SIMULTANEOUSLY during solve: send all TEXT solutions to opened WhatsApp chat with 30s delay
                 const whatsappPayload = solvedList.map(q => ({
                     questionNumber: q.questionNumber,
                     text: q.text,
@@ -1426,47 +810,9 @@ export default function ScannerApp() {
     }, [customSolvePrompt, playQuestionAudio]);
 
     const toggleAudioPlayPause = useCallback(() => {
-        // If paused during the 1.8s loop pause interval, cancel the scheduled replay
-        if (audioLoopTimerRef.current) {
-            clearTimeout(audioLoopTimerRef.current);
-            audioLoopTimerRef.current = null;
-            setIsAudioPlaying(false);
-            setAudioStatusMessage("Audio paused.");
-            return;
-        }
-
-        if (currentAudioRef.current) {
-            if (currentAudioRef.current.paused) {
-                if (currentAudioRef.current.ended) {
-                    currentAudioRef.current.currentTime = 0;
-                }
-                currentAudioRef.current.defaultPlaybackRate = speechRateRef.current;
-                currentAudioRef.current.playbackRate = speechRateRef.current;
-                currentAudioRef.current.play().catch(() => {});
-                setIsAudioPlaying(true);
-            } else {
-                currentAudioRef.current.pause();
-                setIsAudioPlaying(false);
-            }
-        } else if (speechUtteranceRef.current && typeof window !== "undefined" && "speechSynthesis" in window) {
-            if (window.speechSynthesis.speaking) {
-                if (window.speechSynthesis.paused) {
-                    window.speechSynthesis.resume();
-                    setIsAudioPlaying(true);
-                } else {
-                    window.speechSynthesis.pause();
-                    setIsAudioPlaying(false);
-                }
-            } else if (activeAudioIndexRef.current !== null) {
-                playQuestionAudio(activeAudioIndexRef.current);
-            }
-        } else if (activeAudioIndexRef.current !== null) {
-            playQuestionAudio(activeAudioIndexRef.current);
-        } else {
-            const solved = savedQuestionsRef.current.filter(q => !!q.solution);
-            if (solved.length > 0) playQuestionAudio(0, solved);
-        }
-    }, [playQuestionAudio]);
+        setIsAudioPlaying(false);
+        setAudioStatusMessage("Audio disabled (Silent Mode)");
+    }, []);
 
     const cycleNextSolution = useCallback(() => {
         const solved = savedQuestionsRef.current.filter(q => !!q.solution);
@@ -1495,9 +841,6 @@ export default function ScannerApp() {
     const capture = useCallback(async (autoTriggered = false) => {
         if (!videoRef.current) return;
 
-        if (autoTriggered) {
-            try { if ("vibrate" in navigator) navigator.vibrate([100, 50, 100]); } catch { }
-        }
 
         setIsCapturing(true);
         setScanStatus("scanning");
@@ -1653,23 +996,21 @@ export default function ScannerApp() {
                         setDarknessStatus("aborted");
                         setDarknessAbortMessage("RESET complete: All questions cleared. Uncover camera to resume scan polling.");
                         playCancelSound();
-                        try { if ("vibrate" in navigator) navigator.vibrate([250, 100, 250]); } catch { }
                         return;
                     } else if (elapsed >= 5.0) {
-                        // At 5.0 seconds: Play refresh chime sound immediately to notify user!
+                        // At 5.0 seconds: Armed for question switch
                         if (!isRefreshArmedRef.current) {
-                            console.log("[Gesture] 5.0s reached! Refresh sound initiated & armed!");
+                            console.log("[Gesture] 5.0s reached! Question switch armed!");
                             isRefreshArmedRef.current = true;
                             playRefreshArmedSound();
-                            try { if ("vibrate" in navigator) navigator.vibrate([150, 75, 150]); } catch { }
                         }
                         setDarknessStatus("covering");
                         const currentIdx = activeAudioIndexRef.current || 0;
                         const nextNum = ((currentIdx + 1) % solvedQuestions.length) + 1;
-                        setDarknessAbortMessage(`🔄 Armed! Release camera now to play Question ${nextNum} (or hold 10s to Reset)`);
+                        setDarknessAbortMessage(`🔄 Armed! Release camera now to switch to Question ${nextNum} (or hold 10s to Reset)`);
                     } else {
                         setDarknessStatus("covering");
-                        setDarknessAbortMessage(`Covering camera: ${elapsed.toFixed(1)}s (Hold 5s for sound to refresh, 10s to reset)`);
+                        setDarknessAbortMessage(`Covering camera: ${elapsed.toFixed(1)}s (Hold 5s to switch question, 10s to reset)`);
                     }
                 } else if (isSustainedLight) {
                     // Sustained light detected: camera uncovered
@@ -1695,7 +1036,6 @@ export default function ScannerApp() {
                         if (armed) {
                             console.log("[Gesture] Camera uncovered after 5s sound -> REFRESH / NEXT QUESTION!");
                             playBoopSound();
-                            try { if ("vibrate" in navigator) navigator.vibrate([100, 50, 100]); } catch { }
                             cycleNextSolution();
                         }
                     } else {
@@ -1728,7 +1068,6 @@ export default function ScannerApp() {
                     setDarknessStatus("countdown");
                     setDarknessAbortMessage(null);
                     playBoopSound();
-                    try { if ("vibrate" in navigator) navigator.vibrate([120, 60, 120]); } catch { }
                 } else if (elapsed < 5.0) {
                     setDarknessStatus("covering");
                 }
@@ -1757,7 +1096,6 @@ export default function ScannerApp() {
         if (countdown === null) return;
         if (countdown > 0) {
             const timer = setTimeout(() => setCountdown(countdown - 1), 1000);
-            try { if ("vibrate" in navigator) navigator.vibrate(50); } catch { }
             return () => clearTimeout(timer);
         } else if (countdown === 0) {
             setCountdown(null);
@@ -1771,7 +1109,6 @@ export default function ScannerApp() {
                 setDarknessStatus("aborted");
                 setDarknessAbortMessage("Scan aborted: Camera remained covered when countdown ended. Uncover camera to resume.");
                 playCancelSound();
-                try { if ("vibrate" in navigator) navigator.vibrate([200, 100, 200]); } catch { }
                 return;
             }
 
@@ -2266,7 +1603,6 @@ export default function ScannerApp() {
         if (imageSolveCountdown === null) return;
         if (imageSolveCountdown > 0) {
             const timer = setTimeout(() => setImageSolveCountdown(imageSolveCountdown - 1), 1000);
-            try { if ("vibrate" in navigator) navigator.vibrate(50); } catch { }
             return () => clearTimeout(timer);
         } else {
             setImageSolveCountdown(null);
@@ -2394,7 +1730,6 @@ export default function ScannerApp() {
         longPressTimerRef.current = setTimeout(() => {
             setEditingId(q.id);
             setEditingText(q.text);
-            try { if ("vibrate" in navigator) navigator.vibrate(50); } catch { }
         }, 600);
     };
 
@@ -2574,7 +1909,7 @@ export default function ScannerApp() {
                                                         : `Covered (${darknessDuration.toFixed(1)}s / 5.0s)`
                                                 : darknessStatus === "aborted"
                                                     ? "Reset Complete"
-                                                    : "Audio Playback Gestures Active"}
+                                                    : "🖐️ Gestures Active (Silent Mode)"}
                                         </span>
                                     </div>
 
@@ -3196,72 +2531,23 @@ export default function ScannerApp() {
                         <div className="audio-playback-banner">
                             <div className="audio-player-header">
                                 <div className="audio-player-title">
-                                    <span className="audio-pulse-icon">{isAudioPlaying ? "🔊" : "🔈"}</span>
-                                    <span>Playing Question {activeQ?.questionNumber || currentIdx + 1} of {solvedList.length}</span>
+                                    <span className="audio-pulse-icon">📖</span>
+                                    <span>Question {activeQ?.questionNumber || currentIdx + 1} of {solvedList.length} (Silent Mode)</span>
                                 </div>
                                 <div style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
                                     <span className="audio-loop-badge" style={{ background: "hsla(200, 70%, 40%, 0.25)", color: "hsl(200, 80%, 65%)", borderColor: "hsla(200, 70%, 40%, 0.4)" }}>
-                                        ✍️ Paced Pauses
+                                        🖐️ Gestures Active
                                     </span>
                                     <span className="audio-loop-badge" style={{ background: "hsla(140, 70%, 40%, 0.2)", color: "hsl(140, 80%, 65%)", borderColor: "hsla(140, 70%, 40%, 0.35)" }}>
                                         💬 WhatsApp: 120ch/5s
                                     </span>
-                                    <span className="audio-loop-badge">🔁 Looping</span>
-                                    <button
-                                        className="audio-loop-badge"
-                                        onClick={() => { setSettingsTab("transcribe"); setIsSettingsOpen(true); }}
-                                        style={{ background: "hsla(280, 70%, 40%, 0.25)", color: "hsl(280, 80%, 75%)", borderColor: "hsla(280, 70%, 40%, 0.4)", cursor: "pointer" }}
-                                        title="Customize Spoken Transcribe Rules"
-                                    >
-                                        ⚙️ Rules
-                                    </button>
+                                    <span className="audio-loop-badge" style={{ background: "hsla(0, 0%, 30%, 0.3)", color: "hsl(0, 0%, 75%)", borderColor: "hsla(0, 0%, 40%, 0.4)" }}>
+                                        🔇 Audio Muted
+                                    </span>
                                 </div>
                             </div>
 
-                            {activeQ?.questionIntro && (
-                                <div className="audio-intro-text">
-                                    "{activeQ.questionIntro}"
-                                </div>
-                            )}
-
-                            {/* Speech Speed Controls */}
-                            <div className="audio-speed-row">
-                                <span className="audio-speed-label">
-                                    Speech Speed: <strong>{speechRate.toFixed(2)}x</strong> {speechRate <= 0.85 ? "(Dictation Pace)" : ""}
-                                </span>
-                                <div className="audio-speed-presets">
-                                    {[0.65, 0.75, 0.85, 1.0].map((rate) => (
-                                        <button
-                                            key={rate}
-                                            type="button"
-                                            className={`speed-preset-btn ${speechRate === rate ? 'active' : ''}`}
-                                            onClick={() => changeSpeechRate(rate)}
-                                        >
-                                            {rate}x
-                                        </button>
-                                    ))}
-                                    <div className="speed-stepper">
-                                        <button
-                                            type="button"
-                                            className="speed-step-btn"
-                                            onClick={() => changeSpeechRate(speechRate - 0.05)}
-                                            title="Slower speed"
-                                        >
-                                            −
-                                        </button>
-                                        <button
-                                            type="button"
-                                            className="speed-step-btn"
-                                            onClick={() => changeSpeechRate(speechRate + 0.05)}
-                                            title="Faster speed"
-                                        >
-                                            +
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Player seeking & navigation controls */}
+                            {/* Question navigation controls */}
                             <div className="audio-player-controls">
                                 <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap", alignItems: "center" }}>
                                     <button
@@ -3274,35 +2560,11 @@ export default function ScannerApp() {
                                     </button>
                                     <button
                                         type="button"
-                                        className="audio-ctrl-btn"
-                                        onClick={() => rewindAudio(5)}
-                                        title="Rewind 5 seconds (re-hear sentence)"
-                                    >
-                                        ⏪ -5s
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className={`audio-ctrl-btn ${isAudioPlaying ? "primary" : ""}`}
-                                        onClick={toggleAudioPlayPause}
-                                        title={isAudioPlaying ? "Pause audio" : "Play audio"}
-                                    >
-                                        {isAudioPlaying ? "⏸️ Pause" : "▶️ Play"}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="audio-ctrl-btn"
-                                        onClick={() => forwardAudio(5)}
-                                        title="Skip forward 5 seconds"
-                                    >
-                                        +5s ⏩
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="audio-ctrl-btn"
+                                        className="audio-ctrl-btn primary"
                                         onClick={cycleNextSolution}
-                                        title="Next Question (Refresh)"
+                                        title="Next Question (or cover camera 5s & release)"
                                     >
-                                        Next ⏭️
+                                        Next Question ⏭️
                                     </button>
                                 </div>
 
@@ -3317,8 +2579,8 @@ export default function ScannerApp() {
                             </div>
 
                             <div className="audio-gesture-guide">
-                                <span>🖐️ <strong>Refresh:</strong> Cover camera 5s & release to cycle</span>
-                                <span>🛑 <strong>Reset:</strong> Cover camera 10s to wipe</span>
+                                <span>🖐️ <strong>Switch Question:</strong> Cover camera 5s & release</span>
+                                <span>🛑 <strong>Reset All:</strong> Cover camera 10s to wipe</span>
                             </div>
 
                             {audioStatusMessage && (
@@ -3455,27 +2717,12 @@ export default function ScannerApp() {
                                             ) : expandedSolutionIds.has(q.id) && (
                                                 <>
                                                     <div className="solution-text">{q.solution}</div>
-                                                    {q.transcript && (
-                                                        <div className="question-transcript-box">
-                                                            <div className="question-transcript-header">
-                                                                <span>🎙️ Spoken Transcript</span>
-                                                                <button
-                                                                    type="button"
-                                                                    className="audio-ctrl-btn"
-                                                                    style={{ padding: "0.2rem 0.6rem", fontSize: "0.72rem" }}
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        const solvedList = savedQuestions.filter(sq => !!sq.solution);
-                                                                        const targetIdx = solvedList.findIndex(sq => sq.id === q.id);
-                                                                        if (targetIdx >= 0) playQuestionAudio(targetIdx, solvedList);
-                                                                    }}
-                                                                >
-                                                                    🔊 Play
-                                                                </button>
-                                                            </div>
-                                                            <div>{q.transcript}</div>
+                                                    <div className="question-transcript-box">
+                                                        <div className="question-transcript-header">
+                                                            <span>🎙️ Spoken Transcript</span>
                                                         </div>
-                                                    )}
+                                                        <div style={{ fontWeight: 600, letterSpacing: "0.05em", color: "hsl(var(--accent-secondary))" }}>SAMPLE</div>
+                                                    </div>
                                                 </>
                                             )}
                                         </div>

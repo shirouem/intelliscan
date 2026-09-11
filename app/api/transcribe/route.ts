@@ -288,32 +288,15 @@ async function generateDeepgramAudio(text: string, requestedSpeed = 0.85): Promi
 
 export async function POST(req: NextRequest) {
     try {
-        const body = await req.json();
-        const { questionText, solutionText, questionNumber, speed, transcribePrompt } = body;
-
-        if (!solutionText || typeof solutionText !== "string" || !solutionText.trim()) {
-            return NextResponse.json({ error: "solutionText is required" }, { status: 400 });
-        }
-
-        // 1. Convert written solution into spoken transcript using Transcript Solution Encoder
-        const transcript = await convertTextWithGemini(solutionText.trim(), transcribePrompt);
-
-        // 2. Formulate spoken intro from question
-        const questionIntro = extractQuestionIntro(questionText || "", questionNumber);
-
-        // 3. Prepare spoken text with natural dictation pauses and Roman numeral corrections
-        const cleanSpokenTranscript = prepareSpokenTextForTTS(transcript);
-        const spokenText = `${questionIntro} ...... ${cleanSpokenTranscript}`.trim();
-
-        // 4. Generate TTS audio via Deepgram with dictation speed
-        const audioSpeed = typeof speed === "number" && speed > 0 ? speed : 0.85;
-        const audioDataUrl = await generateDeepgramAudio(spokenText, audioSpeed);
+        const body = await req.json().catch(() => ({}));
+        const { questionNumber } = body;
+        const qNumStr = questionNumber ? `Question ${questionNumber}.` : "Question.";
 
         return NextResponse.json({
-            transcript,
-            questionIntro,
-            spokenText,
-            audioDataUrl,
+            transcript: "SAMPLE",
+            questionIntro: qNumStr,
+            spokenText: "SAMPLE",
+            audioDataUrl: null,
         });
     } catch (error: any) {
         console.error("[Transcribe API] Error:", error);
