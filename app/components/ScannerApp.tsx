@@ -216,6 +216,77 @@ function findSolutionForQuestion(q: ScannedQuestion, idx: number, solutionsMap: 
     return null;
 }
 
+/**
+ * Renders technical and CBSE Class 12 Physics & Chemistry solutions with structured visual hierarchy
+ */
+function renderFormattedSolution(solutionText?: string) {
+    if (!solutionText) return null;
+
+    const lines = solutionText.split("\n");
+    const elements: React.ReactNode[] = [];
+    let currentParagraph: string[] = [];
+
+    const flushParagraph = (key: string) => {
+        if (currentParagraph.length > 0) {
+            elements.push(
+                <p key={key} className="solution-paragraph">
+                    {currentParagraph.map((line, lIdx) => (
+                        <React.Fragment key={lIdx}>
+                            {line}
+                            {lIdx < currentParagraph.length - 1 && <br />}
+                        </React.Fragment>
+                    ))}
+                </p>
+            );
+            currentParagraph = [];
+        }
+    };
+
+    lines.forEach((line, idx) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+            flushParagraph(`p-${idx}`);
+            return;
+        }
+
+        const finalMatch = /^\*?(?:Final\s*Answer|Answer|Ans)\s*:?\*?\s*(.*)/i.exec(trimmed);
+        const formulaMatch = /^\*?(?:Formula|Key\s*Formula|Principle|Law)\s*:?\*?\s*(.*)/i.exec(trimmed);
+        const givenMatch = /^\*?(?:Given|Given\s*Data)\s*:?\*?\s*(.*)/i.exec(trimmed);
+
+        if (finalMatch) {
+            flushParagraph(`pre-final-${idx}`);
+            elements.push(
+                <div key={`final-${idx}`} className="solution-section final-answer-box">
+                    <span className="section-tag final-tag">🎯 Final Answer</span>
+                    <div className="section-content final-content">{finalMatch[1] || trimmed}</div>
+                </div>
+            );
+        } else if (formulaMatch) {
+            flushParagraph(`pre-form-${idx}`);
+            elements.push(
+                <div key={`form-${idx}`} className="solution-section formula-box">
+                    <span className="section-tag formula-tag">📐 Formula</span>
+                    <div className="section-content formula-content">{formulaMatch[1] || trimmed}</div>
+                </div>
+            );
+        } else if (givenMatch) {
+            flushParagraph(`pre-given-${idx}`);
+            elements.push(
+                <div key={`given-${idx}`} className="solution-section given-box">
+                    <span className="section-tag given-tag">📋 Given</span>
+                    <div className="section-content given-content">{givenMatch[1] || trimmed}</div>
+                </div>
+            );
+        } else {
+            currentParagraph.push(line);
+        }
+    });
+
+    flushParagraph("final-paragraph");
+
+    return <div className="formatted-solution-container">{elements}</div>;
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 export default function ScannerApp() {
     // ── Refs ──────────────────────────────────────────────────────────────────
@@ -286,6 +357,13 @@ export default function ScannerApp() {
     speechRateRef.current = speechRate;
     savedQuestionsRef.current = savedQuestions;
     activeAudioIndexRef.current = activeAudioIndex;
+
+    // ── Multi-Device Sync & Solved UX States ──────────────────────────────────
+    const lastServerUpdatedAtRef = useRef<string | null>(null);
+    const [syncStatus, setSyncStatus] = useState<"synced" | "syncing" | "offline">("synced");
+    const [copiedId, setCopiedId] = useState<string | null>(null);
+    const [copiedAll, setCopiedAll] = useState<boolean>(false);
+    const questionCardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
     // ── Image Solve mode ──────────────────────────────────────────────────────
     const [imageSolveMode, setImageSolveMode] = useState(false);
@@ -416,6 +494,146 @@ export default function ScannerApp() {
             localStorage.setItem("scannerApp_imageSolveProviderEnabled", JSON.stringify(imageSolveProviderEnabled));
         }
     }, [savedQuestions, customSolvePrompt, customTranscribePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, isLoaded]);
+
+    // ── Server Sync Functions ─────────────────────────────────────────────────
+    const syncQuestionsToServer = useCallback(async (questions: ScannedQuestion[]) => {
+        try {
+            setSyncStatus("syncing");
+            const res = await fetch("/api/questions", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ questions }),
+            });
+            if (res.ok) {
+                const data = await res.json();
+                if (data.updatedAt) lastServerUpdatedAtRef.current = data.updatedAt;
+                setSyncStatus("synced");
+            }
+        } catch {
+            setSyncStatus("offline");
+        }
+    }, []);
+
+    const syncClearServerQuestions = useCallback(async () => {
+        try {
+            setSyncStatus("syncing");
+            const res = await fetch("/api/questions", { method: "DELETE" });
+            if (res.ok) {
+                const data = await res.json();
+                if (data.updatedAt) lastServerUpdatedAtRef.current = data.updatedAt;
+                setSyncStatus("synced");
+            }
+        } catch {
+            setSyncStatus("offline");
+        }
+    }, []);
+
+    const syncDeleteQuestionFromServer = useCallback(async (id: string) => {
+        try {
+            setSyncStatus("syncing");
+            const res = await fetch(`/api/questions?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+            if (res.ok) {
+                const data = await res.json();
+                if (data.updatedAt) lastServerUpdatedAtRef.current = data.updatedAt;
+                setSyncStatus("synced");
+            }
+        } catch {
+            setSyncStatus("offline");
+        }
+    }, []);
+
+    // ── Background Multi-Device Sync Poller ────────────────────────────────────
+    useEffect(() => {
+        let isMounted = true;
+        let isPolling = false;
+
+        const pollServerQuestions = async () => {
+            if (isPolling) return;
+            isPolling = true;
+            try {
+                const url = lastServerUpdatedAtRef.current
+                    ? `/api/questions?since=${encodeURIComponent(lastServerUpdatedAtRef.current)}`
+                    : "/api/questions";
+                const res = await fetch(url, { cache: "no-store" });
+                if (!res.ok) {
+                    if (isMounted) setSyncStatus("offline");
+                    return;
+                }
+                const data = await res.json();
+                if (!isMounted) return;
+
+                if (data.updatedAt) {
+                    lastServerUpdatedAtRef.current = data.updatedAt;
+                }
+                setSyncStatus("synced");
+
+                if (data.changed && Array.isArray(data.questions)) {
+                    setSavedQuestions(data.questions);
+                    localStorage.setItem("scannerApp_savedQuestions", JSON.stringify(data.questions));
+                }
+            } catch {
+                if (isMounted) setSyncStatus("offline");
+            } finally {
+                isPolling = false;
+            }
+        };
+
+        pollServerQuestions();
+        const interval = setInterval(pollServerQuestions, 2500);
+        return () => {
+            isMounted = false;
+            clearInterval(interval);
+        };
+    }, []);
+
+    // Auto-scroll active card into view
+    useEffect(() => {
+        if (activeAudioIndex === null) return;
+        const solvedList = savedQuestions.filter(q => !!q.solution);
+        const activeQ = solvedList[activeAudioIndex];
+        if (activeQ && questionCardRefs.current.has(activeQ.id)) {
+            const el = questionCardRefs.current.get(activeQ.id);
+            el?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+    }, [activeAudioIndex, savedQuestions]);
+
+    const copyQuestionAndSolution = useCallback((q: ScannedQuestion, e: React.MouseEvent) => {
+        e.stopPropagation();
+        const textToCopy = `Question ${q.questionNumber}:\n${q.text}\n\nSolution:\n${q.solution || "(No solution)"}`;
+        if (typeof navigator !== "undefined" && navigator.clipboard) {
+            navigator.clipboard.writeText(textToCopy).then(() => {
+                setCopiedId(q.id);
+                setTimeout(() => setCopiedId(null), 2000);
+            }).catch(() => {});
+        }
+    }, []);
+
+    const copyAllSolutions = useCallback(() => {
+        const solvedList = savedQuestions.filter(q => !!q.solution);
+        if (solvedList.length === 0) return;
+
+        const header = `INTELLISCAN - SOLVED QUESTIONS & SOLUTIONS (${solvedList.length} total)\n==================================================\n\n`;
+        const body = solvedList.map(q => `Question ${q.questionNumber}:\n${q.text}\n\nSolution:\n${q.solution}\n\n--------------------------------------------------\n`).join("\n");
+        const fullText = header + body;
+
+        if (typeof navigator !== "undefined" && navigator.clipboard) {
+            navigator.clipboard.writeText(fullText).then(() => {
+                setCopiedAll(true);
+                setTimeout(() => setCopiedAll(false), 2000);
+            }).catch(() => {});
+        }
+    }, [savedQuestions]);
+
+    const toggleExpandAll = useCallback(() => {
+        const solvedList = savedQuestions.filter(q => !!q.solution);
+        if (solvedList.length === 0) return;
+        const allExpanded = solvedList.every(q => expandedSolutionIds.has(q.id));
+        if (allExpanded) {
+            setExpandedSolutionIds(new Set());
+        } else {
+            setExpandedSolutionIds(new Set(solvedList.map(q => q.id)));
+        }
+    }, [savedQuestions, expandedSolutionIds]);
 
     // ── Load image solve history ──────────────────────────────────────────────
     const fetchHistory = useCallback(async () => {
@@ -738,6 +956,7 @@ export default function ScannerApp() {
             audioDataUrl: null,
             questionIntro: `Question ${qNumStr}.`
         } : q));
+        setExpandedSolutionIds(prev => new Set(prev).add(targetQ.id));
     }, []);
 
     const autoSolveAndPlay = useCallback(async (questionsToSolve: ScannedQuestion[]) => {
@@ -769,6 +988,7 @@ export default function ScannerApp() {
             });
 
             setSavedQuestions(updatedQuestions);
+            syncQuestionsToServer(updatedQuestions);
             const solvedList = updatedQuestions.filter(q => !!q.solution);
             setExpandedSolutionIds(new Set(questionsToSolve.map(q => q.id)));
 
@@ -920,22 +1140,42 @@ export default function ScannerApp() {
         const imageData = ctx.getImageData(0, 0, 32, 32);
         const data = imageData.data;
         let totalLuminance = 0;
+        let totalG = 0;
+        let totalB = 0;
         const pixelCount = data.length / 4;
         const luminances: number[] = [];
+        let skinScatterCount = 0;
 
         for (let i = 0; i < data.length; i += 4) {
-            const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            const lum = 0.299 * r + 0.587 * g + 0.114 * b;
             totalLuminance += lum;
+            totalG += g;
+            totalB += b;
             luminances.push(lum);
+
+            // Translucent skin-scatter check: skin allows red through while absorbing green and blue
+            if (r > 1.4 * g && g < 55 && b < 45) {
+                skinScatterCount++;
+            }
         }
 
         const avgLuminance = totalLuminance / pixelCount;
-        luminances.sort((a, b) => a - b);
-        const p95Luminance = luminances[Math.floor(pixelCount * 0.95)] || avgLuminance;
+        const avgG = totalG / pixelCount;
+        const avgB = totalB / pixelCount;
 
-        // Covered camera threshold: average luminance < 28 and 95th percentile < 55
-        // This reliably handles palm/finger skin scatter and camera auto-ISO in lit rooms
-        const isDark = avgLuminance < 28 && p95Luminance < 55;
+        luminances.sort((a, b) => a - b);
+        const p90Luminance = luminances[Math.floor(pixelCount * 0.90)] || avgLuminance;
+
+        // Covered camera detection:
+        // 1. Pure dark: avgLuminance < 36 and 90th percentile < 65
+        // 2. Translucent finger/palm skin scatter: green & blue strongly attenuated
+        const isPureDark = avgLuminance < 36 && p90Luminance < 65;
+        const isSkinCovered = (skinScatterCount / pixelCount > 0.40) && (avgG < 50 && avgB < 45);
+
+        const isDark = isPureDark || isSkinCovered;
         return { isDark, avgLuminance };
     }, []);
 
@@ -961,8 +1201,9 @@ export default function ScannerApp() {
                 consecutiveLightTicksRef.current += 1;
             }
 
-            // Sustained light (>= 300ms / 3 ticks) required to declare genuinely uncovered
-            const isSustainedLight = !isDark && consecutiveLightTicksRef.current >= 3;
+            // Sustained light (>= 400ms / 4 ticks) required to declare genuinely uncovered
+            // This grants high immunity to lighting flicker or minor hand adjustments
+            const isSustainedLight = !isDark && consecutiveLightTicksRef.current >= 4;
 
             const currentSaved = savedQuestionsRef.current;
             const solvedQuestions = currentSaved.filter(q => !!q.solution);
@@ -979,9 +1220,9 @@ export default function ScannerApp() {
                     const elapsed = (now - darknessStartTimeRef.current) / 1000;
                     setDarknessDuration(elapsed);
 
-                    // 10s Continuous Darkness -> FULL RESET
-                    if (elapsed >= 10.0) {
-                        console.log("[Gesture] 10s continuous darkness -> RESET TRIGGERED!");
+                    // 7.5s Continuous Darkness -> FULL RESET
+                    if (elapsed >= 7.5) {
+                        console.log("[Gesture] 7.5s continuous darkness -> RESET TRIGGERED!");
                         darknessStartTimeRef.current = null;
                         isRefreshArmedRef.current = false;
                         setDarknessDuration(0);
@@ -993,24 +1234,23 @@ export default function ScannerApp() {
                         setActiveAudioIndex(null);
                         setAudioStatusMessage(null);
                         audioDataCacheRef.current.clear();
+                        syncClearServerQuestions();
                         setDarknessStatus("aborted");
-                        setDarknessAbortMessage("RESET complete: All questions cleared. Uncover camera to resume scan polling.");
-                        playCancelSound();
+                        setDarknessAbortMessage("RESET complete: All questions cleared from server & devices. Uncover camera to resume scan polling.");
                         return;
-                    } else if (elapsed >= 5.0) {
-                        // At 5.0 seconds: Armed for question switch
+                    } else if (elapsed >= 3.5) {
+                        // At 3.5 seconds: Armed for question switch
                         if (!isRefreshArmedRef.current) {
-                            console.log("[Gesture] 5.0s reached! Question switch armed!");
+                            console.log("[Gesture] 3.5s reached! Question switch armed!");
                             isRefreshArmedRef.current = true;
-                            playRefreshArmedSound();
                         }
                         setDarknessStatus("covering");
                         const currentIdx = activeAudioIndexRef.current || 0;
                         const nextNum = ((currentIdx + 1) % solvedQuestions.length) + 1;
-                        setDarknessAbortMessage(`🔄 Armed! Release camera now to switch to Question ${nextNum} (or hold 10s to Reset)`);
+                        setDarknessAbortMessage(`🔄 Armed! Release camera now to switch to Question ${nextNum} (or hold 7.5s to Reset)`);
                     } else {
                         setDarknessStatus("covering");
-                        setDarknessAbortMessage(`Covering camera: ${elapsed.toFixed(1)}s (Hold 5s to switch question, 10s to reset)`);
+                        setDarknessAbortMessage(`Covering camera: ${elapsed.toFixed(1)}s (Hold 3.5s to switch question, 7.5s to reset)`);
                     }
                 } else if (isSustainedLight) {
                     // Sustained light detected: camera uncovered
@@ -1034,8 +1274,7 @@ export default function ScannerApp() {
                         setDarknessAbortMessage(null);
 
                         if (armed) {
-                            console.log("[Gesture] Camera uncovered after 5s sound -> REFRESH / NEXT QUESTION!");
-                            playBoopSound();
+                            console.log("[Gesture] Camera uncovered after 3.5s -> SWITCH TO NEXT QUESTION!");
                             cycleNextSolution();
                         }
                     } else {
@@ -1050,7 +1289,7 @@ export default function ScannerApp() {
                 if (abortedDueToLongDarknessRef.current) return;
 
                 if (countdown !== null) {
-                    setDarknessDuration(5);
+                    setDarknessDuration(3.5);
                     return;
                 }
 
@@ -1059,16 +1298,15 @@ export default function ScannerApp() {
                 }
 
                 const elapsed = (now - darknessStartTimeRef.current) / 1000;
-                setDarknessDuration(Math.min(elapsed, 5));
+                setDarknessDuration(Math.min(elapsed, 3.5));
 
-                if (elapsed >= 5.0 && !countdownTriggeredByDarknessRef.current && countdown === null) {
-                    console.log("[Darkness Poller] Darkness reached 5s! Initiating countdown.");
+                if (elapsed >= 3.5 && !countdownTriggeredByDarknessRef.current && countdown === null) {
+                    console.log("[Darkness Poller] Darkness reached 3.5s! Initiating countdown.");
                     countdownTriggeredByDarknessRef.current = true;
                     setCountdown(captureDelay);
                     setDarknessStatus("countdown");
                     setDarknessAbortMessage(null);
-                    playBoopSound();
-                } else if (elapsed < 5.0) {
+                } else if (elapsed < 3.5) {
                     setDarknessStatus("covering");
                 }
             } else if (isSustainedLight) {
@@ -1089,7 +1327,7 @@ export default function ScannerApp() {
         }, 100);
 
         return () => clearInterval(interval);
-    }, [mounted, imageSolveMode, scanStatus, cameraError, countdown, captureDelay, checkFrameDarkness, cycleNextSolution, stopCurrentAudio]);
+    }, [mounted, imageSolveMode, scanStatus, cameraError, countdown, captureDelay, checkFrameDarkness, cycleNextSolution, stopCurrentAudio, syncClearServerQuestions]);
 
     // ── Countdown for scan ────────────────────────────────────────────────────
     useEffect(() => {
@@ -1641,12 +1879,15 @@ export default function ScannerApp() {
             const data = await response.json();
             const solutions: Record<string, string> = data.solutions || {};
 
-            setSavedQuestions(prev => prev.map(q => {
+            const updated = savedQuestions.map(q => {
                 if (selectedQuestionIds.has(q.id) && solutions[q.id]) {
                     return { ...q, solution: solutions[q.id], isSolving: false };
                 }
                 return { ...q, isSolving: false };
-            }));
+            });
+
+            setSavedQuestions(updated);
+            syncQuestionsToServer(updated);
 
             setExpandedSolutionIds(prev => {
                 const next = new Set(prev);
@@ -1695,12 +1936,14 @@ export default function ScannerApp() {
         setAudioStatusMessage(null);
         audioDataCacheRef.current.clear();
         setScanStatus("idle");
+        syncClearServerQuestions();
     };
 
     const deleteQuestion = (idToDelete: string) => {
         setSavedQuestions(prev => prev.filter(q => q.id !== idToDelete));
         setSelectedQuestionIds(prev => { const next = new Set(prev); next.delete(idToDelete); return next; });
         setExpandedSolutionIds(prev => { const next = new Set(prev); next.delete(idToDelete); return next; });
+        syncDeleteQuestionFromServer(idToDelete);
     };
 
     const toggleSolutionExpanded = (id: string) => {
@@ -1738,7 +1981,11 @@ export default function ScannerApp() {
 
     const saveEdit = (id: string, e: React.MouseEvent) => {
         e.stopPropagation();
-        setSavedQuestions(prev => prev.map(q => q.id === id ? { ...q, text: editingText } : q));
+        setSavedQuestions(prev => {
+            const next = prev.map(q => q.id === id ? { ...q, text: editingText } : q);
+            syncQuestionsToServer(next);
+            return next;
+        });
         setEditingId(null);
         setEditingText("");
     };
@@ -1902,30 +2149,30 @@ export default function ScannerApp() {
                                         <span className={`status-indicator-dot ${darknessStatus}`}></span>
                                         <span className="status-indicator-title">
                                             {darknessStatus === "covering"
-                                                ? darknessDuration >= 4.5 && darknessDuration <= 7.5
-                                                    ? "Ready! Release to cycle (Refresh)"
-                                                    : darknessDuration > 7.5
-                                                        ? `Hold for 10s to RESET (${(10 - darknessDuration).toFixed(1)}s)`
-                                                        : `Covered (${darknessDuration.toFixed(1)}s / 5.0s)`
+                                                ? darknessDuration >= 3.5 && darknessDuration < 7.5
+                                                    ? "Ready! Release to switch question"
+                                                    : darknessDuration >= 7.5
+                                                        ? `⚠️ Hold reached: Release to RESET ALL (${(10 - darknessDuration).toFixed(0)}s)`
+                                                        : `Covered (${darknessDuration.toFixed(1)}s / 3.5s)`
                                                 : darknessStatus === "aborted"
                                                     ? "Reset Complete"
                                                     : "🖐️ Gestures Active (Silent Mode)"}
                                         </span>
                                     </div>
 
-                                    {/* Darkness Progress Bar towards 10s */}
+                                    {/* Darkness Progress Bar towards 7.5s */}
                                     <div className="darkness-meter-wrapper">
                                         <div
-                                            className={`darkness-meter-bar ${darknessDuration >= 4.5 ? 'full' : ''}`}
-                                            style={{ width: `${Math.min(100, (darknessDuration / 10) * 100)}%` }}
+                                            className={`darkness-meter-bar ${darknessDuration >= 7.5 ? 'reset-warning' : darknessDuration >= 3.5 ? 'armed' : ''}`}
+                                            style={{ width: `${Math.min(100, (darknessDuration / 7.5) * 100)}%` }}
                                         ></div>
                                     </div>
 
                                     <p className="polling-status-desc">
                                         {darknessAbortMessage || (
                                             darknessStatus === "covering"
-                                                ? "Release between 5s to cycle to next solution. Hold for 10s to reset all problems."
-                                                : "🖐️ Cover camera for 5s & release to skip to next solution. Cover for 10s to reset."
+                                                ? "Release between 3.5s to switch to next question. Hold for 7.5s to reset all problems."
+                                                : "🖐️ Cover camera for 3.5s & release to switch question. Cover for 7.5s to reset."
                                         )}
                                     </p>
                                 </div>
@@ -1937,19 +2184,19 @@ export default function ScannerApp() {
                                             {countdown !== null
                                                 ? `Scan Countdown: ${countdown}s`
                                                 : darknessStatus === "covering"
-                                                    ? `Darkness Detected (${darknessDuration.toFixed(1)}s / 5.0s)`
+                                                    ? `Darkness Detected (${darknessDuration.toFixed(1)}s / 3.5s)`
                                                     : darknessStatus === "aborted"
                                                         ? "Scan Aborted (Misfire Protection)"
                                                         : "Continuous Polling Active"}
                                         </span>
                                     </div>
 
-                                    {/* Darkness Progress Bar (0 to 5s) */}
+                                    {/* Darkness Progress Bar (0 to 3.5s) */}
                                     {countdown === null && darknessStatus !== "aborted" && (
                                         <div className="darkness-meter-wrapper">
                                             <div
-                                                className={`darkness-meter-bar ${darknessDuration >= 5 ? 'full' : ''}`}
-                                                style={{ width: `${Math.min(100, (darknessDuration / 5) * 100)}%` }}
+                                                className={`darkness-meter-bar ${darknessDuration >= 3.5 ? 'full armed' : ''}`}
+                                                style={{ width: `${Math.min(100, (darknessDuration / 3.5) * 100)}%` }}
                                             ></div>
                                         </div>
                                     )}
@@ -1962,11 +2209,11 @@ export default function ScannerApp() {
                                                 "Position paper in view! Capturing automatically when countdown ends..."
                                             )
                                         ) : darknessStatus === "covering" ? (
-                                            "Hold covered for 5 seconds to trigger scan countdown..."
+                                            "Hold covered for 3.5 seconds to trigger scan countdown..."
                                         ) : darknessStatus === "aborted" ? (
                                             darknessAbortMessage || "Camera remained covered when countdown ended. Uncover camera to resume."
                                         ) : (
-                                            "Cover camera with hand or object for 5 seconds to trigger scan."
+                                            "Cover camera with hand or object for 3.5 seconds to trigger scan."
                                         )}
                                     </p>
 
@@ -2562,7 +2809,7 @@ export default function ScannerApp() {
                                         type="button"
                                         className="audio-ctrl-btn primary"
                                         onClick={cycleNextSolution}
-                                        title="Next Question (or cover camera 5s & release)"
+                                        title="Next Question (or cover camera 3.5s & release)"
                                     >
                                         Next Question ⏭️
                                     </button>
@@ -2579,8 +2826,8 @@ export default function ScannerApp() {
                             </div>
 
                             <div className="audio-gesture-guide">
-                                <span>🖐️ <strong>Switch Question:</strong> Cover camera 5s & release</span>
-                                <span>🛑 <strong>Reset All:</strong> Cover camera 10s to wipe</span>
+                                <span>🖐️ <strong>Switch Question:</strong> Cover camera 3.5s & release</span>
+                                <span>🛑 <strong>Reset All:</strong> Cover camera 7.5s to wipe</span>
                             </div>
 
                             {audioStatusMessage && (
@@ -2593,25 +2840,57 @@ export default function ScannerApp() {
                 })()}
 
                 {bottomTab === "questions" && savedQuestions.length > 0 && (
-                    <div className="tabs-container">
-                        <button
-                            className={`tab-btn ${activeTab === "all" ? "active" : ""}`}
-                            onClick={() => setActiveTab("all")}
-                        >
-                            All ({savedQuestions.length})
-                        </button>
-                        <button
-                            className={`tab-btn ${activeTab === "unsolved" ? "active" : ""}`}
-                            onClick={() => setActiveTab("unsolved")}
-                        >
-                            Unsolved ({savedQuestions.filter(q => !q.solution).length})
-                        </button>
-                        <button
-                            className={`tab-btn ${activeTab === "solved" ? "active" : ""}`}
-                            onClick={() => setActiveTab("solved")}
-                        >
-                            Solved ({savedQuestions.filter(q => !!q.solution).length})
-                        </button>
+                    <div className="questions-header-bar">
+                        <div className="tabs-container" style={{ marginBottom: 0 }}>
+                            <button
+                                className={`tab-btn ${activeTab === "all" ? "active" : ""}`}
+                                onClick={() => setActiveTab("all")}
+                            >
+                                All ({savedQuestions.length})
+                            </button>
+                            <button
+                                className={`tab-btn ${activeTab === "unsolved" ? "active" : ""}`}
+                                onClick={() => setActiveTab("unsolved")}
+                            >
+                                Unsolved ({savedQuestions.filter(q => !q.solution).length})
+                            </button>
+                            <button
+                                className={`tab-btn ${activeTab === "solved" ? "active" : ""}`}
+                                onClick={() => setActiveTab("solved")}
+                            >
+                                Solved ({savedQuestions.filter(q => !!q.solution).length})
+                            </button>
+                        </div>
+
+                        <div className="questions-toolbar-actions">
+                            {savedQuestions.some(q => !!q.solution) && (
+                                <>
+                                    <button
+                                        type="button"
+                                        className={`toolbar-action-btn ${copiedAll ? "success" : ""}`}
+                                        onClick={copyAllSolutions}
+                                        title="Copy all solved questions and answers to clipboard"
+                                    >
+                                        {copiedAll ? "✓ Copied All" : "📋 Copy All"}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="toolbar-action-btn"
+                                        onClick={toggleExpandAll}
+                                        title="Toggle expand/collapse on all solutions"
+                                    >
+                                        ↕️ {savedQuestions.filter(q => !!q.solution).every(q => expandedSolutionIds.has(q.id)) ? "Collapse All" : "Expand All"}
+                                    </button>
+                                </>
+                            )}
+                            <div
+                                className={`sync-status-badge ${syncStatus}`}
+                                title={syncStatus === "synced" ? "Synced with server & other devices" : syncStatus === "syncing" ? "Syncing changes..." : "Server offline"}
+                            >
+                                <span className="sync-dot"></span>
+                                <span>{syncStatus === "synced" ? "Synced" : syncStatus === "syncing" ? "Syncing..." : "Offline"}</span>
+                            </div>
+                        </div>
                     </div>
                 )}
 
@@ -2645,10 +2924,18 @@ export default function ScannerApp() {
 
                     {filteredQuestions.length > 0 && (
                         <div className="questions-list">
-                            {filteredQuestions.map((q, idx) => (
+                            {filteredQuestions.map((q, idx) => {
+                                const solvedList = savedQuestions.filter(sq => !!sq.solution);
+                                const isCurrentFocus = activeAudioIndex !== null && solvedList[activeAudioIndex]?.id === q.id;
+
+                                return (
                                 <div
                                     key={q.id || idx}
-                                    className={`question-card ${selectedQuestionIds.has(q.id) ? 'selected' : ''}`}
+                                    ref={(el) => {
+                                        if (el) questionCardRefs.current.set(q.id, el);
+                                        else questionCardRefs.current.delete(q.id);
+                                    }}
+                                    className={`question-card ${selectedQuestionIds.has(q.id) ? 'selected' : ''} ${isCurrentFocus ? 'active-focus-card' : ''}`}
                                     onClick={() => handleCardClick(q.id, !!q.solution)}
                                     onPointerDown={(e) => {
                                         if ((e.target as HTMLElement).tagName.toLowerCase() !== 'input' && editingId !== q.id) {
@@ -2671,14 +2958,29 @@ export default function ScannerApp() {
                                                 onClick={(e) => e.stopPropagation()}
                                             />
                                             <span className="question-number">Question {q.questionNumber}</span>
+                                            {isCurrentFocus && (
+                                                <span className="active-question-pill">🎯 Focus</span>
+                                            )}
                                         </div>
-                                        <button
-                                            className="delete-btn"
-                                            onClick={(e) => { e.stopPropagation(); deleteQuestion(q.id); }}
-                                            aria-label="Delete question"
-                                        >
-                                            ✕
-                                        </button>
+                                        <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
+                                            {q.solution && (
+                                                <button
+                                                    type="button"
+                                                    className={`card-copy-btn ${copiedId === q.id ? "copied" : ""}`}
+                                                    onClick={(e) => copyQuestionAndSolution(q, e)}
+                                                    title="Copy Question and Solution"
+                                                >
+                                                    {copiedId === q.id ? "✓ Copied" : "📋 Copy"}
+                                                </button>
+                                            )}
+                                            <button
+                                                className="delete-btn"
+                                                onClick={(e) => { e.stopPropagation(); deleteQuestion(q.id); }}
+                                                aria-label="Delete question"
+                                            >
+                                                ✕
+                                            </button>
+                                        </div>
                                     </div>
 
                                     {editingId === q.id ? (
@@ -2716,7 +3018,9 @@ export default function ScannerApp() {
                                                 </div>
                                             ) : expandedSolutionIds.has(q.id) && (
                                                 <>
-                                                    <div className="solution-text">{q.solution}</div>
+                                                    <div className="solution-text">
+                                                        {renderFormattedSolution(q.solution)}
+                                                    </div>
                                                     <div className="question-transcript-box">
                                                         <div className="question-transcript-header">
                                                             <span>🎙️ Spoken Transcript</span>
@@ -2728,7 +3032,8 @@ export default function ScannerApp() {
                                         </div>
                                     )}
                                 </div>
-                            ))}
+                                );
+                            })}
                         </div>
                     )}
                 </div>}

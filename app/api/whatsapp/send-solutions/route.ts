@@ -8,58 +8,92 @@ if (typeof (globalThis as any).geminiKeyIndex === "undefined") {
 
 export const maxDuration = 120;
 
-const WHATSAPP_PLAIN_TEXT_SYSTEM_PROMPT = `You are an expert CBSE Class 12th Chemistry & STEM Plain-Text Solution Formatter.
+const WHATSAPP_PLAIN_TEXT_SYSTEM_PROMPT = `You are an expert CBSE Class 12th Physics & Chemistry Plain-Text Solution Formatter.
 Your task is to convert written solutions into clean, crystal-clear, unambiguous plain text formatted specifically for messaging on WhatsApp and viewing in basic text editors (like Notepad) without requiring any LaTeX or special font rendering.
 
 CRITICAL FORMATTING RULES:
 
 1. NO UNRENDERABLE SUPERSCRIPTS OR SUBSCRIPTS:
    - Absolutely DO NOT use Unicode superscripts (like ², ³, ⁺, ⁻, ²⁺, ⁴⁻) or Unicode subscripts (like ₂, ₄). Many text editors and mobile fonts fail to render them, showing broken boxes or question marks.
-   - For ionic charges: Use standard caret or parentheses, e.g. "Zn^2+" or "Zn(2+)", "Cu^2+", "Al^3+", "Fe^2+", "Fe^3+", "Cl^-", "SO4^2-", "[Fe(CN)6]^4-", "e^-".
-   - For subshell electronic configurations: ALWAYS use caret "^", e.g. "1s^2 2s^2 2p^6 3s^2 3p^6 3d^10 4s^2" or "[Ar] 3d^5 4s^1", "[Ar] 3d^10 4s^1". Never write unrendered unicode like 3d⁵ 4s¹.
-   - For chemical molecular formulas: Write standard ASCII numbers without subscript, e.g. "H2O", "H2SO4", "KMnO4", "K2Cr2O7", "CH3-CH2-OH", "Ca(OH)2".
+   - For powers and scientific notation: ALWAYS use caret "^", e.g. "10^-19", "3 * 10^8", "r^2", "v^2", "1.6 * 10^-19 C", "9 * 10^9 N m^2 C^-2".
+   - For subshell electronic configurations: "1s^2 2s^2 2p^6 3s^2 3p^6 3d^10 4s^2", "[Ar] 3d^5 4s^1".
+   - For ionic charges: "Zn^2+", "Cu^2+", "Al^3+", "Fe^2+", "Fe^3+", "Cl^-", "SO4^2-", "e^-".
+   - For chemical formulas: Write standard ASCII numbers without subscript, e.g. "H2O", "H2SO4", "KMnO4", "K2Cr2O7".
 
 2. ZERO LATEX OR MARKDOWN CODE:
-   - Absolutely NO LaTeX markup (never output \\frac, \\sqrt, \\text, \\left, \\right, \\cdot, \\times, \\pm, \\approx, \\mathbf, \\(, \\), \\[, \\], $, or \\begin/\\end blocks).
+   - Absolutely NO LaTeX markup (never output \\frac, \\sqrt, \\vec, \\hat, \\theta, \\lambda, \\mu, \\epsilon, \\omega, \\text, \\left, \\right, \\cdot, \\times, \\pm, \\approx, \\mathbf, \\(, \\), \\[, \\], $, or \\begin/\\end blocks).
    - WhatsApp cannot render LaTeX or MathJax; every single formula must be in readable ASCII text.
 
-3. UNAMBIGUOUS MATHEMATICAL & PHYSICAL CHEMISTRY NOTATION:
-   - Fractions: Always write as (numerator) / (denominator) with parentheses around compound expressions (e.g. "(P1^0 - P1) / P1^0 = i * x2" or "(-b +/- sqrt(b^2 - 4ac)) / (2a)").
-   - Nernst Equation: E_cell = E^0_cell - (0.0591 / n) * log10([Anode ion] / [Cathode ion]) at 298 K.
-   - Colligative Properties: Delta Tb = i * K_b * m, Delta Tf = i * K_f * m, pi = i * C * R * T.
-   - Chemical Kinetics: First order k = (2.303 / t) * log10([R]0 / [R]), t_(1/2) = 0.693 / k, Rate = k * [A]^x * [B]^y.
-   - Roots & Powers: Use "sqrt(...)" and "^", e.g. mu = sqrt(n * (n + 2)) BM, 10^-3, 10^5.
-   - Greek Letters & Units: Write as words or clean ASCII: Delta H^0, Delta G^0, Lambda^0_m, kappa, alpha, pi; units: "g/mol", "mol L^-1", "S cm^2 mol^-1", "J/mol", "K", "atm".
+3. CBSE CLASS 12 PHYSICS NOTATION & CHAPTER GUIDELINES:
+   - Vectors & Unit Vectors:
+     - Vector quantities: Write as "vec(E)", "vec(B)", "vec(v)", "vec(F)", "vec(p)".
+     - Unit vectors: Write as "i_hat", "j_hat", "k_hat" or "n_hat".
+     - Dot product: Write as "vec(A) . vec(B) = |A| * |B| * cos(theta)".
+     - Cross product: Write as "vec(A) x vec(B) = |A| * |B| * sin(theta) * n_hat".
+   - Electrostatics & Capacitance:
+     - Coulomb's Law: F = (1 / (4 * pi * epsilon_0)) * (|q1 * q2| / r^2) where (1 / (4 * pi * epsilon_0)) = 9 * 10^9 N m^2 C^-2.
+     - Electric Field & Potential: E = F / q (in N/C or V/m), V = (1 / (4 * pi * epsilon_0)) * (q / r) (in Volts).
+     - Capacitance: C = (epsilon_0 * A) / d, with dielectric C = K * C_0, Energy U = (1/2) * C * V^2 = Q^2 / (2 * C).
+   - Current Electricity:
+     - Drift velocity: v_d = (e * E * tau) / m, Current I = n * e * A * v_d.
+     - Ohm's law: V = I * R, Resistance R = rho * L / A, Temperature R_T = R_0 * (1 + alpha * Delta T).
+     - Kirchhoff's Rules: Current Law sum(I) = 0, Voltage Law sum(V) = sum(I * R).
+     - Wheatstone Bridge: P / Q = R / S; Potentiometer E1 / E2 = l1 / l2.
+   - Magnetism & Magnetic Effects:
+     - Biot-Savart Law: dB = (mu_0 / (4 * pi)) * (I * dl * sin(theta) / r^2) where mu_0 / (4 * pi) = 10^-7 T m A^-1.
+     - Straight wire B = (mu_0 * I) / (2 * pi * d), Circular loop at center B = (mu_0 * N * I) / (2 * R).
+     - Solenoid B = mu_0 * n * I, Toroid B = mu_0 * n * I.
+     - Lorentz Force: vec(F) = q * (vec(E) + vec(v) x vec(B)), on current wire vec(F) = I * (vec(L) x vec(B)).
+     - Galvanometer: Torque tau = N * I * A * B * sin(theta), Shunt S = (I_g * G) / (I - I_g), Multiplier R = (V / I_g) - G.
+   - Electromagnetic Induction & AC:
+     - Magnetic Flux: Phi_B = B * A * cos(theta) (in Weber, Wb).
+     - Faraday's Law: e = - dPhi_B / dt = - N * (Delta Phi_B / Delta t).
+     - Motional EMF: e = B * v * l. Self-inductance e = - L * (dI / dt).
+     - AC Circuits: V_rms = V_0 / sqrt(2) = 0.707 * V_0, I_rms = I_0 / sqrt(2).
+     - Reactance: X_L = omega * L = 2 * pi * f * L, X_C = 1 / (omega * C) = 1 / (2 * pi * f * C).
+     - Impedance: Z = sqrt(R^2 + (X_L - X_C)^2).
+     - Resonant frequency: f_0 = 1 / (2 * pi * sqrt(L * C)).
+     - Power factor: cos(phi) = R / Z, Average power P = V_rms * I_rms * cos(phi).
+     - Transformer: V_s / V_p = N_s / N_p = I_p / I_s.
+   - Optics (Ray & Wave):
+     - Mirror Formula: 1/f = 1/v + 1/u, Magnification m = -v / u.
+     - Lens Formula: 1/f = 1/v - 1/u, Magnification m = v / u.
+     - Lens Maker's Formula: 1/f = (n - 1) * (1/R1 - 1/R2), Power P = 1 / f (in Diopters, D, f in meters).
+     - Prism Formula: n = sin((A + D_m) / 2) / sin(A / 2).
+     - YDSE Fringe Width: beta = (lambda * D) / d; Maxima path diff Delta x = n * lambda, Minima Delta x = (2n - 1) * lambda / 2.
+     - Single Slit Diffraction: First minimum at a * sin(theta) = lambda, Central max width = 2 * lambda * D / a.
+   - Modern Physics & Semiconductors:
+     - Photoelectric Effect: K_max = h * nu - phi_0 = e * V_0 (h = 6.63 * 10^-34 J s).
+     - de Broglie Wavelength: lambda = h / p = h / sqrt(2 * m * K) = 1.227 / sqrt(V) nm for electron.
+     - Bohr Model: E_n = -13.6 * (Z^2 / n^2) eV, r_n = 0.529 * (n^2 / Z) Angstrom.
+     - Nuclear Radius R = R_0 * A^(1/3) (R_0 = 1.2 * 10^-15 m).
+     - Binding Energy: BE = Delta m * c^2 = Delta m * 931.5 MeV.
+     - Logic Gates: AND (Y = A . B), OR (Y = A + B), NOT (Y = not(A)), NAND (Y = not(A . B)), NOR (Y = not(A + B)).
 
-4. INORGANIC & COORDINATION CHEMISTRY (CBSE CLASS 12):
-   - Coordination complexes: Write clear brackets, e.g. "[Co(NH3)6]Cl3", "[Ni(CN)4]^2-", "K4[Fe(CN)6]".
-   - Hybridization & Geometry: Write as "sp^3" (tetrahedral), "dsp^2" (square planar), "d^2sp^3" or "sp^3d^2" (octahedral).
-   - Crystal Field Theory: Write splitting as "Delta_o" or "Delta_t", configurations like "t2g^4 eg^2" or "t2g^6 eg^0".
-   - Magnetic Moment: mu = sqrt(n * (n + 2)) BM (where n = number of unpaired electrons).
+4. PHYSICAL CONSTANTS & GREEK SYMBOLS:
+   - Always spell Greek letters in clean English: epsilon_0, mu_0, lambda, omega, theta, phi, Phi_B, rho, tau, nu, alpha, beta, gamma, delta, eta.
+   - SI Units: N, C, V, A, Ohm, T (Tesla), Wb (Weber), H (Henry), F (Farad), J, W, eV, MeV, m/s, rad/s, Hz, N/C, V/m, kg, m, s, deg.
 
-5. ORGANIC CHEMISTRY CONVERSIONS & REACTIONS (CBSE CLASS 12):
-   - Reagents over arrow: Format clearly as:
-     Reactant  --[Reagent / Conditions]-->  Product
-     Examples:
-     - CH3-CH2-OH  --[PCC]-->  CH3-CHO
-     - CH3-COOH  --[SOCl2]-->  CH3-COCl + SO2 + HCl
-     - Benzene  --[conc. HNO3 / conc. H2SO4, 55 deg C]-->  Nitrobenzene
-     - R-CONH2  --[Br2 + 4NaOH (Hoffmann Bromamide)]-->  R-NH2 + Na2CO3 + 2NaBr + 2H2O
-     - R-CHO  --[Tollens' reagent (ammoniacal AgNO3)]-->  R-COO^- + Ag (Silver Mirror)
-   - Distinction tests (Lucas test, Iodoform test, Carbylamine test, Ferric chloride test) with clear observation: e.g. "Forms yellow precipitate of CHI3".
-   - Mechanisms: Clearly label "Step 1: Protonation...", "Step 2: Carbocation intermediate...", "Step 3: Elimination...".
+5. CBSE CLASS 12 CHEMISTRY NOTATION:
+   - Colligative: Delta Tb = i * K_b * m, Delta Tf = i * K_f * m, pi = i * C * R * T.
+   - Kinetics: First order k = (2.303 / t) * log10([R]0 / [R]), t_(1/2) = 0.693 / k.
+   - Electrochemistry: E_cell = E^0_cell - (0.0591 / n) * log10([Anode ion] / [Cathode ion]).
+   - Organic Reactions: Reactant --[Reagents]--> Product (e.g. CH3-CH2-OH --[PCC]--> CH3-CHO).
 
 6. STRUCTURE & READABILITY:
-   - Direct, CBSE marking-scheme compliant steps: Formula -> Substitution -> Calculation -> Final Answer.
-   - Format with simple, clean headers: "Step 1: ...", "Step 2: ...", and "*Final Answer:* ...".
+   - Direct, CBSE marking-scheme compliant format:
+     *Given:* ...
+     *Formula:* ...
+     *Substitution:* ...
+     *Calculation:* ...
+     *Final Answer:* [Symbol] = [Value] [SI Unit]
    - WhatsApp supports basic bold using single asterisks "*text*". Use "*text*" for key labels and final answers. Do NOT use markdown code fences, headers (#), or HTML tags.
 
 7. EXACT ACCURACY:
    - Do NOT alter, omit, or approximate any calculation, number, sign, variable, unit, or step from the original solution.
 
 8. OUTPUT FORMAT:
-   - Return ONLY the converted plain-text solution.
-   - Do NOT include any intro like "Here is the WhatsApp formatted text:". Start immediately with the solution.`;
+   - Return ONLY the converted plain-text solution. Start immediately with the solution.`;
 
 /**
  * Robust nested-brace parser to convert \frac{num}{den} into (num) / (den)
@@ -155,7 +189,13 @@ function fallbackFormatForWhatsApp(solution: string): string {
     text = text.replace(/\b([A-Z][a-z]?|\bSO4|\bNO3|\bCO3|\bPO4|\bOH)(\d{1,2})([+-])\b/g, "$1^$2$3");
     text = text.replace(/\be-\b/g, "e^-");
 
-    // 7. Math & chem functions
+    // 7. Vectors and unit vectors
+    text = text.replace(/\\vec\{([^{}]+)\}/g, "vec($1)");
+    text = text.replace(/\\vec\s+([A-Za-z])/g, "vec($1)");
+    text = text.replace(/\\hat\{([^{}]+)\}/g, "$1_hat");
+    text = text.replace(/\\hat\s+([A-Za-z])/g, "$1_hat");
+
+    // 8. Math & chem functions
     text = text.replace(/\\log_\{?10\}?/g, "log10");
     text = text.replace(/\\log/g, "log");
     text = text.replace(/\\ln/g, "ln");
@@ -170,18 +210,36 @@ function fallbackFormatForWhatsApp(solution: string): string {
     text = text.replace(/\\degree|\^\\circ/g, " deg");
     text = text.replace(/\\rightarrow|\\to/g, "->");
     text = text.replace(/\\rightleftharpoons/g, "<=>");
+    text = text.replace(/\\int/g, "int");
+    text = text.replace(/\\oint/g, "oint");
+    text = text.replace(/\\infty/g, "inf");
+    text = text.replace(/\\partial/g, "d");
 
-    // 8. Common Greek letters
+    // 9. Common Greek letters & Physics Constants
+    text = text.replace(/\\pi\s*\\(?:epsilon_0|varepsilon_0)/g, "pi * epsilon_0");
+    text = text.replace(/\\epsilon_0|\\varepsilon_0/g, " epsilon_0");
+    text = text.replace(/\\mu_0/g, " mu_0");
+    text = text.replace(/\\Omega/g, "Ohm");
+    text = text.replace(/\\Phi_B/g, "Phi_B");
+    text = text.replace(/\\Phi_E/g, "Phi_E");
+    text = text.replace(/\\hbar/g, "h/(2*pi)");
+
     const greek: Record<string, string> = {
         alpha: "alpha", beta: "beta", gamma: "gamma", delta: "Delta",
-        theta: "theta", lambda: "lambda", mu: "mu", pi: "pi", sigma: "sigma"
+        theta: "theta", lambda: "lambda", mu: "mu", pi: "pi", sigma: "sigma",
+        omega: "omega", tau: "tau", rho: "rho", nu: "nu", eta: "eta", phi: "phi",
+        psi: "psi", epsilon: "epsilon"
     };
     for (const [name, sym] of Object.entries(greek)) {
-        const reg = new RegExp(`\\\\${name}\\b`, "gi");
+        const reg = new RegExp(`\\\\${name}(?![a-zA-Z])`, "gi");
         text = text.replace(reg, sym);
     }
 
-    // 9. Strip LaTeX sizing and text wrappers
+    // Multiply implied coefficients e.g. 4pi -> 4 * pi, pi epsilon_0 -> pi * epsilon_0
+    text = text.replace(/(\d+)\s*(pi|epsilon_0|mu_0|omega)\b/g, "$1 * $2");
+    text = text.replace(/(pi)\s*(epsilon_0|mu_0)\b/g, "$1 * $2");
+
+    // 10. Strip LaTeX sizing and text wrappers
     text = text.replace(/\\(?:text|mathbf|mathit|mathrm|textbf)\{([^{}]+)\}/g, "$1");
     text = text.replace(/\\(?:left|right|big|Big|bigg|Bigg|displaystyle|limits|nolimits)/g, "");
     text = text.replace(/\\(?:quad|qquad|\s*,|\s*;|\s*!)/g, " ");

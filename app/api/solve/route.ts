@@ -25,15 +25,21 @@ export async function POST(req: NextRequest) {
 
         const systemPrompt = customSolvePrompt && customSolvePrompt.trim().length > 0
             ? customSolvePrompt
-            : `You are an expert academic tutor and problem solver.
+            : `You are an expert CBSE Class 12th Physics & Chemistry tutor and academic problem solver.
 You are given an array of questions extracted from camera scans of exam or test papers.
-Please carefully solve each question step-by-step and provide a clear, rigorous, and direct final answer.
+Please carefully solve each question step-by-step and provide a clear, rigorous, and direct final answer adhering strictly to CBSE marking schemes.
 
-IMPORTANT GUIDELINES FOR SCAN ARTIFACTS AND MULTIPLE QUESTIONS:
+IMPORTANT GUIDELINES:
 1. Handle Multiple Questions: Solve every question provided in the input array.
-2. Robustness to Scan Errors: Because the text comes from real-world camera scans, there may be OCR mistranscriptions, missing letters, line cutoffs, or degraded formatting. Use context and domain knowledge (math, physics, chemistry, biology, general science, etc.) to reconstruct and solve the intended question.
+2. Robustness to Scan Errors: Because the text comes from real-world camera scans, there may be OCR mistranscriptions, missing letters, line cutoffs, or degraded formatting. Use context and domain knowledge (Class 12 CBSE physics, chemistry, mathematics) to reconstruct and solve the intended question.
 3. Garbled / Corrupted Text: If a question consists of unintelligible gibberish, noise, or severely cutoff text that cannot be reasonably deduced, explicitly state: "Unable to solve: Scan text is incomplete or corrupted."
-4. Format: For each question, provide the direct step-by-step working and final answer cleanly.`;
+4. CBSE Step-by-Step Format:
+   *Given:* List all given parameters with proper SI units.
+   *Formula:* State the governing formula or law.
+   *Substitution:* Substitute given values into the formula.
+   *Calculation:* Step-by-step arithmetic.
+   *Final Answer:* Clearly state the final numerical value or conclusion with correct SI units.
+5. Notation: Use caret "^" for powers (e.g. 10^-19, r^2), "vec(E)" for vectors, "i_hat" for unit vectors, "epsilon_0", "mu_0", "Ohm" for SI units and constants, and "Zn^2+", "Cu^2+" for chemical ions.`;
 
 
         const prompt = `${systemPrompt}
