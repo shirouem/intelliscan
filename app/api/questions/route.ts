@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
+import os from "os";
 import { DEFAULT_SOLVE_PROMPT, DEFAULT_TRANSCRIBE_PROMPT } from "@/app/constants/prompts";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const FILE_PATH = path.join(DATA_DIR, "scanned_questions.json");
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "https://mprqfblotnzfclogmbwv.supabase.co";
+const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1wcnFmYmxvdG56ZmNsb2dtYnd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk4NzMwMTYsImV4cCI6MjA4NTQ0OTAxNn0.AfGoX6R-UtY6dYzAjXpDdUclfvX8hL8xooIKMBAOJDk";
 
 const noCacheHeaders = {
     "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
@@ -35,72 +36,119 @@ interface StorageData {
     transcribePrompt?: string;
 }
 
-function ensureDataFile(): StorageData {
-    if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    if (!fs.existsSync(FILE_PATH)) {
-        const initial: StorageData = {
-            updatedAt: Date.now(),
-            version: 1,
-            questions: [],
-            solvePrompt: DEFAULT_SOLVE_PROMPT,
-            transcribePrompt: DEFAULT_TRANSCRIBE_PROMPT,
-        };
-        fs.writeFileSync(FILE_PATH, JSON.stringify(initial, null, 2), "utf-8");
-        return initial;
-    }
+// ── Cloud Database Store (Supabase REST) ──────────────────────────────────────
+async function readFromCloud(): Promise<StorageData | null> {
     try {
-        const content = fs.readFileSync(FILE_PATH, "utf-8");
-        const parsed = JSON.parse(content) as StorageData;
-        let modified = false;
-
-        if (!parsed.solvePrompt) {
-            parsed.solvePrompt = DEFAULT_SOLVE_PROMPT;
-            modified = true;
-        }
-        if (!parsed.transcribePrompt) {
-            parsed.transcribePrompt = DEFAULT_TRANSCRIBE_PROMPT;
-            modified = true;
-        }
-        if (!Array.isArray(parsed.questions)) {
-            parsed.questions = [];
-            modified = true;
-        }
-
-        if (modified) {
-            fs.writeFileSync(FILE_PATH, JSON.stringify(parsed, null, 2), "utf-8");
-        }
-        return parsed;
-    } catch {
-        const fallback: StorageData = {
-            updatedAt: Date.now(),
-            version: 1,
-            questions: [],
-            solvePrompt: DEFAULT_SOLVE_PROMPT,
-            transcribePrompt: DEFAULT_TRANSCRIBE_PROMPT,
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/intelliscan_sync?id=eq.current`, {
+            headers: {
+                apikey: SUPABASE_KEY,
+                Authorization: `Bearer ${SUPABASE_KEY}`,
+            },
+            cache: "no-store",
+        });
+        if (!res.ok) return null;
+        const rows = await res.json();
+        if (!Array.isArray(rows) || rows.length === 0) return null;
+        const row = rows[0];
+        return {
+            updatedAt: Number(row.updated_at) || Date.now(),
+            version: Number(row.version) || 1,
+            questions: Array.isArray(row.questions) ? row.questions : [],
+            solvePrompt: row.solve_prompt || DEFAULT_SOLVE_PROMPT,
+            transcribePrompt: row.transcribe_prompt || DEFAULT_TRANSCRIBE_PROMPT,
         };
-        fs.writeFileSync(FILE_PATH, JSON.stringify(fallback, null, 2), "utf-8");
-        return fallback;
+    } catch (e) {
+        console.warn("[Cloud Storage] Read failed, using fallback:", e);
+        return null;
     }
 }
 
-function writeDataFile(data: StorageData) {
-    if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
+async function writeToCloud(data: StorageData): Promise<boolean> {
+    try {
+        const payload = {
+            updated_at: data.updatedAt,
+            version: data.version,
+            questions: data.questions,
+            solve_prompt: data.solvePrompt || DEFAULT_SOLVE_PROMPT,
+            transcribe_prompt: data.transcribePrompt || DEFAULT_TRANSCRIBE_PROMPT,
+        };
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/intelliscan_sync?id=eq.current`, {
+            method: "PATCH",
+            headers: {
+                apikey: SUPABASE_KEY,
+                Authorization: `Bearer ${SUPABASE_KEY}`,
+                "Content-Type": "application/json",
+                Prefer: "return=representation",
+            },
+            body: JSON.stringify(payload),
+        });
+        return res.ok;
+    } catch (e) {
+        console.warn("[Cloud Storage] Write failed, using fallback:", e);
+        return false;
     }
-    const tempPath = `${FILE_PATH}.tmp.${Date.now()}`;
-    fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), "utf-8");
-    fs.renameSync(tempPath, FILE_PATH);
 }
 
-// GET: Fetch questions, prompts, and sync status
+// ── Fallback Local File Storage ───────────────────────────────────────────────
+function getFallbackFilePath(): string {
+    const localDir = path.join(process.cwd(), "data");
+    try {
+        if (!fs.existsSync(localDir)) fs.mkdirSync(localDir, { recursive: true });
+        return path.join(localDir, "scanned_questions.json");
+    } catch {
+        return path.join(os.tmpdir(), "scanned_questions.json");
+    }
+}
+
+function readLocalFallback(): StorageData {
+    const filePath = getFallbackFilePath();
+    try {
+        if (fs.existsSync(filePath)) {
+            const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+            return {
+                updatedAt: parsed.updatedAt || Date.now(),
+                version: parsed.version || 1,
+                questions: Array.isArray(parsed.questions) ? parsed.questions : [],
+                solvePrompt: parsed.solvePrompt || DEFAULT_SOLVE_PROMPT,
+                transcribePrompt: parsed.transcribePrompt || DEFAULT_TRANSCRIBE_PROMPT,
+            };
+        }
+    } catch {}
+    return {
+        updatedAt: Date.now(),
+        version: 1,
+        questions: [],
+        solvePrompt: DEFAULT_SOLVE_PROMPT,
+        transcribePrompt: DEFAULT_TRANSCRIBE_PROMPT,
+    };
+}
+
+function writeLocalFallback(data: StorageData) {
+    try {
+        const filePath = getFallbackFilePath();
+        fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+    } catch {}
+}
+
+// ── Unified Storage Interface ─────────────────────────────────────────────────
+async function getStorageData(): Promise<StorageData> {
+    const cloudData = await readFromCloud();
+    if (cloudData) return cloudData;
+    return readLocalFallback();
+}
+
+async function saveStorageData(data: StorageData): Promise<void> {
+    writeLocalFallback(data);
+    await writeToCloud(data);
+}
+
+// ── GET: Fetch questions and sync status ───────────────────────────────────────
 export async function GET(req: NextRequest) {
     try {
         const { searchParams } = new URL(req.url);
         const since = Number(searchParams.get("since") || 0);
 
-        const data = ensureDataFile();
+        const data = await getStorageData();
 
         if (since && since >= data.updatedAt) {
             return NextResponse.json({
@@ -125,13 +173,13 @@ export async function GET(req: NextRequest) {
     }
 }
 
-// POST: Save or merge questions and/or sync prompts
+// ── POST: Save or merge questions and sync prompts ────────────────────────────
 export async function POST(req: NextRequest) {
     try {
         const body = await req.json().catch(() => ({}));
         const { questions, action = "set", solvePrompt, transcribePrompt } = body;
 
-        const current = ensureDataFile();
+        const current = await getStorageData();
         let newQuestions = current.questions;
 
         if (Array.isArray(questions)) {
@@ -143,7 +191,6 @@ export async function POST(req: NextRequest) {
                 });
                 newQuestions = Array.from(map.values());
             } else {
-                // "set" replaces the current list
                 newQuestions = questions;
             }
         }
@@ -164,7 +211,7 @@ export async function POST(req: NextRequest) {
             transcribePrompt: newTranscribePrompt,
         };
 
-        writeDataFile(updated);
+        await saveStorageData(updated);
 
         return NextResponse.json({
             success: true,
@@ -180,19 +227,18 @@ export async function POST(req: NextRequest) {
     }
 }
 
-// DELETE: Clear all questions or delete by ID (preserves prompts)
+// ── DELETE: Clear all questions or delete by ID ───────────────────────────────
 export async function DELETE(req: NextRequest) {
     try {
         const { searchParams } = new URL(req.url);
         const idToDelete = searchParams.get("id");
 
-        const current = ensureDataFile();
+        const current = await getStorageData();
         let updatedQuestions: ScannedQuestion[] = [];
 
         if (idToDelete) {
             updatedQuestions = current.questions.filter(q => q.id !== idToDelete);
         } else {
-            // Clear all questions
             updatedQuestions = [];
         }
 
@@ -204,7 +250,7 @@ export async function DELETE(req: NextRequest) {
             transcribePrompt: current.transcribePrompt || DEFAULT_TRANSCRIBE_PROMPT,
         };
 
-        writeDataFile(updated);
+        await saveStorageData(updated);
 
         return NextResponse.json({
             success: true,
