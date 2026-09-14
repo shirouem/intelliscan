@@ -359,7 +359,9 @@ export default function ScannerApp() {
     activeAudioIndexRef.current = activeAudioIndex;
 
     // ── Multi-Device Sync & Solved UX States ──────────────────────────────────
-    const lastServerUpdatedAtRef = useRef<string | null>(null);
+    const lastServerUpdatedAtRef = useRef<number | null>(null);
+    const isSettingsOpenRef = useRef(isSettingsOpen);
+    isSettingsOpenRef.current = isSettingsOpen;
     const [syncStatus, setSyncStatus] = useState<"synced" | "syncing" | "offline">("synced");
     const [copiedId, setCopiedId] = useState<string | null>(null);
     const [copiedAll, setCopiedAll] = useState<boolean>(false);
@@ -514,6 +516,27 @@ export default function ScannerApp() {
         }
     }, []);
 
+    const syncPromptsToServer = useCallback(async (solvePrompt?: string, transcribePrompt?: string) => {
+        try {
+            setSyncStatus("syncing");
+            const body: Record<string, string> = {};
+            if (typeof solvePrompt === "string") body.solvePrompt = solvePrompt;
+            if (typeof transcribePrompt === "string") body.transcribePrompt = transcribePrompt;
+            const res = await fetch("/api/questions", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+            if (res.ok) {
+                const data = await res.json();
+                if (data.updatedAt) lastServerUpdatedAtRef.current = data.updatedAt;
+                setSyncStatus("synced");
+            }
+        } catch {
+            setSyncStatus("offline");
+        }
+    }, []);
+
     const syncClearServerQuestions = useCallback(async () => {
         try {
             setSyncStatus("syncing");
@@ -551,10 +574,17 @@ export default function ScannerApp() {
             if (isPolling) return;
             isPolling = true;
             try {
+                const timestamp = Date.now();
                 const url = lastServerUpdatedAtRef.current
-                    ? `/api/questions?since=${encodeURIComponent(lastServerUpdatedAtRef.current)}`
-                    : "/api/questions";
-                const res = await fetch(url, { cache: "no-store" });
+                    ? `/api/questions?since=${encodeURIComponent(lastServerUpdatedAtRef.current)}&_t=${timestamp}`
+                    : `/api/questions?_t=${timestamp}`;
+                const res = await fetch(url, {
+                    cache: "no-store",
+                    headers: {
+                        "Cache-Control": "no-cache, no-store, must-revalidate",
+                        "Pragma": "no-cache",
+                    },
+                });
                 if (!res.ok) {
                     if (isMounted) setSyncStatus("offline");
                     return;
@@ -567,9 +597,34 @@ export default function ScannerApp() {
                 }
                 setSyncStatus("synced");
 
-                if (data.changed && Array.isArray(data.questions)) {
-                    setSavedQuestions(data.questions);
-                    localStorage.setItem("scannerApp_savedQuestions", JSON.stringify(data.questions));
+                if (data.changed) {
+                    // Update questions list
+                    if (Array.isArray(data.questions)) {
+                        setSavedQuestions(data.questions);
+                        localStorage.setItem("scannerApp_savedQuestions", JSON.stringify(data.questions));
+
+                        // Auto-expand any questions with solutions so they're immediately visible
+                        const solvedIds = data.questions.filter((q: ScannedQuestion) => !!q.solution).map((q: ScannedQuestion) => q.id);
+                        if (solvedIds.length > 0) {
+                            setExpandedSolutionIds(prev => {
+                                const next = new Set(prev);
+                                solvedIds.forEach((id: string) => next.add(id));
+                                return next;
+                            });
+                        }
+                    }
+
+                    // Update prompts if settings modal is not open
+                    if (!isSettingsOpenRef.current) {
+                        if (typeof data.solvePrompt === "string" && data.solvePrompt.trim()) {
+                            setCustomSolvePrompt(data.solvePrompt);
+                            localStorage.setItem("scannerApp_solvePrompt", data.solvePrompt);
+                        }
+                        if (typeof data.transcribePrompt === "string" && data.transcribePrompt.trim()) {
+                            setCustomTranscribePrompt(data.transcribePrompt);
+                            localStorage.setItem("scannerApp_transcribePrompt", data.transcribePrompt);
+                        }
+                    }
                 }
             } catch {
                 if (isMounted) setSyncStatus("offline");
@@ -579,7 +634,7 @@ export default function ScannerApp() {
         };
 
         pollServerQuestions();
-        const interval = setInterval(pollServerQuestions, 2500);
+        const interval = setInterval(pollServerQuestions, 2000);
         return () => {
             isMounted = false;
             clearInterval(interval);
@@ -965,6 +1020,8 @@ export default function ScannerApp() {
         setIsProcessingSolutions(true);
         setAudioStatusMessage("Solving scanned questions with AI...");
 
+        let solvedList: ScannedQuestion[] = [];
+
         try {
             const payload = questionsToSolve.map(q => ({ id: q.id, text: q.text }));
             const solveRes = await fetch("/api/solve", {
@@ -981,53 +1038,82 @@ export default function ScannerApp() {
             const solveData = await solveRes.json();
             const solutionsMap: Record<string, string> = solveData.solutions || {};
 
-            // Map solutions to questions deterministically with fuzzy key support
-            const updatedQuestions = questionsToSolve.map((q, idx) => {
+            // Map solutions to newly solved batch
+            const newlySolvedBatch = questionsToSolve.map((q, idx) => {
                 const sol = findSolutionForQuestion(q, idx, solutionsMap);
                 return sol ? { ...q, solution: sol, transcript: "SAMPLE", audioDataUrl: null, isSolving: false } : { ...q, isSolving: false };
             });
 
-            setSavedQuestions(updatedQuestions);
-            syncQuestionsToServer(updatedQuestions);
-            const solvedList = updatedQuestions.filter(q => !!q.solution);
-            setExpandedSolutionIds(new Set(questionsToSolve.map(q => q.id)));
+            const newlySolvedMap = new Map<string, ScannedQuestion>(newlySolvedBatch.map(q => [q.id, q]));
+
+            // Cumulatively merge into all saved questions without wiping previous batches
+            const currentSaved = savedQuestionsRef.current;
+            const allUpdated = currentSaved.map(q => newlySolvedMap.get(q.id) || q);
+
+            // In case any newly solved question was not yet in currentSaved, append it
+            newlySolvedBatch.forEach(q => {
+                if (!allUpdated.some(existing => existing.id === q.id)) {
+                    allUpdated.push(q);
+                }
+            });
+
+            setSavedQuestions(allUpdated);
+            await syncQuestionsToServer(allUpdated);
+            solvedList = newlySolvedBatch.filter(q => !!q.solution);
+
+            // Add new question IDs to expandedSolutionIds
+            setExpandedSolutionIds(prev => {
+                const next = new Set(prev);
+                questionsToSolve.forEach(q => next.add(q.id));
+                return next;
+            });
 
             if (solvedList.length > 0) {
-                // Select first question silently (Question 1 active, transcript: SAMPLE, no audio)
-                playQuestionAudio(0, solvedList);
+                // Focus the first question of this new batch silently
+                const solvedAll = allUpdated.filter(q => !!q.solution);
+                const targetIdx = solvedAll.findIndex(q => q.id === solvedList[0].id);
+                playQuestionAudio(targetIdx >= 0 ? targetIdx : 0, solvedAll);
+                setAudioStatusMessage(`Solved ${solvedList.length} new question(s) successfully (${solvedAll.length} total).`);
+            } else {
+                setAudioStatusMessage("No solutions generated for new batch.");
+            }
+        } catch (err: unknown) {
+            console.error("Auto solve failed:", err);
+            setErrorMessage(getErrorMessage(err, "Failed to solve questions."));
+            setAudioStatusMessage("Solving failed: " + getErrorMessage(err));
+            const failedIds = new Set(questionsToSolve.map(q => q.id));
+            setSavedQuestions(prev => prev.map(q => failedIds.has(q.id) ? { ...q, isSolving: false } : q));
+        } finally {
+            setIsProcessingSolutions(false);
+        }
 
-                // SIMULTANEOUSLY during solve: send all TEXT solutions to opened WhatsApp chat with 30s delay
+        // ── STRICTLY AFTER EVERYTHING ELSE HAS COMPLETED: Send to WhatsApp without delay ──
+        if (solvedList.length > 0) {
+            console.log("[WhatsApp] Dispatching solutions strictly AFTER solve completion without delay...");
+            try {
                 const whatsappPayload = solvedList.map(q => ({
                     questionNumber: q.questionNumber,
                     text: q.text,
                     solution: q.solution,
                 }));
 
-                fetch("/api/whatsapp/send-solutions", {
+                const res = await fetch("/api/whatsapp/send-solutions", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ solutions: whatsappPayload, delaySeconds: 30, blockDelaySeconds: 5 }),
-                }).then(res => res.json())
-                  .then(data => {
-                      if (data.ok) {
-                          console.log("[WhatsApp] Solutions queued for WhatsApp dispatch:", data);
-                      } else {
-                          console.warn("[WhatsApp] Dispatch warning:", data.error);
-                      }
-                  })
-                  .catch(e => console.warn("[WhatsApp] Dispatch request failed:", e));
-            } else {
-                setAudioStatusMessage("No solutions generated from scan.");
+                    body: JSON.stringify({ solutions: whatsappPayload, delaySeconds: 0, blockDelaySeconds: 0 }),
+                });
+                const data = await res.json().catch(() => ({}));
+                if (data.ok) {
+                    console.log("[WhatsApp] Solutions dispatched without delay:", data);
+                    setAudioStatusMessage(`All ${solvedList.length} solutions sent to WhatsApp.`);
+                } else {
+                    console.warn("[WhatsApp] Dispatch warning:", data.error);
+                }
+            } catch (e) {
+                console.warn("[WhatsApp] Dispatch request failed:", e);
             }
-        } catch (err: unknown) {
-            console.error("Auto solve failed:", err);
-            setErrorMessage(getErrorMessage(err, "Failed to solve questions."));
-            setAudioStatusMessage("Solving failed: " + getErrorMessage(err));
-            setSavedQuestions(prev => prev.map(q => ({ ...q, isSolving: false })));
-        } finally {
-            setIsProcessingSolutions(false);
         }
-    }, [customSolvePrompt, playQuestionAudio]);
+    }, [customSolvePrompt, playQuestionAudio, syncQuestionsToServer]);
 
     const toggleAudioPlayPause = useCallback(() => {
         setIsAudioPlaying(false);
@@ -1100,24 +1186,39 @@ export default function ScannerApp() {
                 return;
             }
 
-            const assignedQuestions: ScannedQuestion[] = rawQuestions.map((newQ: any, idx: number) => ({
-                id: newQ.id || `q-${Date.now()}-${idx}`,
-                questionNumber: newQ.questionNumber || String(idx + 1),
-                text: newQ.text || "",
-                isSolving: true,
-            }));
+            const existingQuestions = savedQuestionsRef.current;
+            const existingCount = existingQuestions.length;
 
-            setSavedQuestions(assignedQuestions);
+            const assignedQuestions: ScannedQuestion[] = rawQuestions.map((newQ: any, idx: number) => {
+                const questionNum = newQ.questionNumber && !existingQuestions.some(eq => eq.questionNumber === newQ.questionNumber)
+                    ? newQ.questionNumber
+                    : String(existingCount + idx + 1);
+
+                return {
+                    id: newQ.id || `q-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 6)}`,
+                    questionNumber: questionNum,
+                    text: newQ.text || "",
+                    isSolving: true,
+                    createdAt: Date.now(),
+                };
+            });
+
+            // CUMULATIVELY append to existing questions
+            const cumulativeQuestions = [...existingQuestions, ...assignedQuestions];
+            setSavedQuestions(cumulativeQuestions);
             setScanStatus("success");
 
-            // Automatically solve all questions and start spoken looping playback
+            // IMMEDIATELY sync cumulative questions to server so Device 2 displays all previous + new solving questions
+            syncQuestionsToServer(cumulativeQuestions);
+
+            // Automatically solve ONLY the new batch of questions
             autoSolveAndPlay(assignedQuestions);
         } catch (error: unknown) {
             console.error("Scan error:", error);
             setScanStatus("error");
             setErrorMessage(getErrorMessage(error, "Failed to process the question paper."));
         }
-    }, [captureHighQualityFrame, autoSolveAndPlay]);
+    }, [captureHighQualityFrame, autoSolveAndPlay, syncQuestionsToServer]);
 
     // ── Frame Darkness Detection ──────────────────────────────────────────────
     const checkFrameDarkness = useCallback((): { isDark: boolean; avgLuminance: number } => {
@@ -1205,86 +1306,6 @@ export default function ScannerApp() {
             // This grants high immunity to lighting flicker or minor hand adjustments
             const isSustainedLight = !isDark && consecutiveLightTicksRef.current >= 4;
 
-            const currentSaved = savedQuestionsRef.current;
-            const solvedQuestions = currentSaved.filter(q => !!q.solution);
-            const hasActiveSolutions = solvedQuestions.length > 0;
-
-            if (hasActiveSolutions) {
-                // ── PLAYBACK GESTURE MODE ──────────────────────────────────
-                if (isDark) {
-                    if (darknessStartTimeRef.current === null) {
-                        darknessStartTimeRef.current = now;
-                        isRefreshArmedRef.current = false;
-                    }
-
-                    const elapsed = (now - darknessStartTimeRef.current) / 1000;
-                    setDarknessDuration(elapsed);
-
-                    // 7.5s Continuous Darkness -> FULL RESET
-                    if (elapsed >= 7.5) {
-                        console.log("[Gesture] 7.5s continuous darkness -> RESET TRIGGERED!");
-                        darknessStartTimeRef.current = null;
-                        isRefreshArmedRef.current = false;
-                        setDarknessDuration(0);
-                        abortedDueToLongDarknessRef.current = true; // Wait for uncover
-                        stopCurrentAudio();
-                        fetch("/api/whatsapp/cancel", { method: "POST" }).catch(() => {});
-                        setSavedQuestions([]);
-                        setSelectedQuestionIds(new Set());
-                        setActiveAudioIndex(null);
-                        setAudioStatusMessage(null);
-                        audioDataCacheRef.current.clear();
-                        syncClearServerQuestions();
-                        setDarknessStatus("aborted");
-                        setDarknessAbortMessage("RESET complete: All questions cleared from server & devices. Uncover camera to resume scan polling.");
-                        return;
-                    } else if (elapsed >= 3.5) {
-                        // At 3.5 seconds: Armed for question switch
-                        if (!isRefreshArmedRef.current) {
-                            console.log("[Gesture] 3.5s reached! Question switch armed!");
-                            isRefreshArmedRef.current = true;
-                        }
-                        setDarknessStatus("covering");
-                        const currentIdx = activeAudioIndexRef.current || 0;
-                        const nextNum = ((currentIdx + 1) % solvedQuestions.length) + 1;
-                        setDarknessAbortMessage(`🔄 Armed! Release camera now to switch to Question ${nextNum} (or hold 7.5s to Reset)`);
-                    } else {
-                        setDarknessStatus("covering");
-                        setDarknessAbortMessage(`Covering camera: ${elapsed.toFixed(1)}s (Hold 3.5s to switch question, 7.5s to reset)`);
-                    }
-                } else if (isSustainedLight) {
-                    // Sustained light detected: camera uncovered
-                    if (abortedDueToLongDarknessRef.current) {
-                        console.log("[Gesture] Camera uncovered after reset. Ready for scan.");
-                        abortedDueToLongDarknessRef.current = false;
-                        setDarknessStatus("idle");
-                        setDarknessAbortMessage(null);
-                        darknessStartTimeRef.current = null;
-                        isRefreshArmedRef.current = false;
-                        setDarknessDuration(0);
-                        return;
-                    }
-
-                    if (darknessStartTimeRef.current !== null) {
-                        const armed = isRefreshArmedRef.current;
-                        darknessStartTimeRef.current = null;
-                        isRefreshArmedRef.current = false;
-                        setDarknessDuration(0);
-                        setDarknessStatus("idle");
-                        setDarknessAbortMessage(null);
-
-                        if (armed) {
-                            console.log("[Gesture] Camera uncovered after 3.5s -> SWITCH TO NEXT QUESTION!");
-                            cycleNextSolution();
-                        }
-                    } else {
-                        setDarknessStatus("idle");
-                    }
-                }
-                return;
-            }
-
-            // ── IDLE / SCAN MODE (No active solutions) ─────────────────────
             if (isDark) {
                 if (abortedDueToLongDarknessRef.current) return;
 
@@ -1301,7 +1322,7 @@ export default function ScannerApp() {
                 setDarknessDuration(Math.min(elapsed, 3.5));
 
                 if (elapsed >= 3.5 && !countdownTriggeredByDarknessRef.current && countdown === null) {
-                    console.log("[Darkness Poller] Darkness reached 3.5s! Initiating countdown.");
+                    console.log("[Darkness Poller] Darkness reached 3.5s! Initiating scan countdown.");
                     countdownTriggeredByDarknessRef.current = true;
                     setCountdown(captureDelay);
                     setDarknessStatus("countdown");
@@ -1327,7 +1348,7 @@ export default function ScannerApp() {
         }, 100);
 
         return () => clearInterval(interval);
-    }, [mounted, imageSolveMode, scanStatus, cameraError, countdown, captureDelay, checkFrameDarkness, cycleNextSolution, stopCurrentAudio, syncClearServerQuestions]);
+    }, [mounted, imageSolveMode, scanStatus, cameraError, countdown, captureDelay, checkFrameDarkness]);
 
     // ── Countdown for scan ────────────────────────────────────────────────────
     useEffect(() => {
@@ -1852,13 +1873,17 @@ export default function ScannerApp() {
     const processSelectedQuestions = async () => {
         if (selectedQuestionIds.size === 0 || isProcessingSolutions) return;
 
-        setIsProcessingSolutions(true);
-        setSavedQuestions(prev => prev.map(q =>
+        const solvingState = savedQuestions.map(q =>
             selectedQuestionIds.has(q.id) ? { ...q, isSolving: true } : q
-        ));
+        );
+        setSavedQuestions(solvingState);
+        syncQuestionsToServer(solvingState);
+
+        const targetIds = new Set(selectedQuestionIds);
+        let newlySolvedList: ScannedQuestion[] = [];
 
         try {
-            const questionsToSend = Array.from(selectedQuestionIds)
+            const questionsToSend = Array.from(targetIds)
                 .map(id => {
                     const q = savedQuestions.find(sq => sq.id === id);
                     return q ? { id: q.id, text: q.text } : null;
@@ -1880,21 +1905,22 @@ export default function ScannerApp() {
             const solutions: Record<string, string> = data.solutions || {};
 
             const updated = savedQuestions.map(q => {
-                if (selectedQuestionIds.has(q.id) && solutions[q.id]) {
+                if (targetIds.has(q.id) && solutions[q.id]) {
                     return { ...q, solution: solutions[q.id], isSolving: false };
                 }
                 return { ...q, isSolving: false };
             });
 
             setSavedQuestions(updated);
-            syncQuestionsToServer(updated);
+            await syncQuestionsToServer(updated);
 
             setExpandedSolutionIds(prev => {
                 const next = new Set(prev);
-                selectedQuestionIds.forEach(id => { if (solutions[id]) next.add(id); });
+                targetIds.forEach(id => { if (solutions[id]) next.add(id); });
                 return next;
             });
 
+            newlySolvedList = updated.filter(q => targetIds.has(q.id) && !!q.solution);
             setSelectedQuestionIds(new Set());
         } catch (error: unknown) {
             console.error("Solve error:", error);
@@ -1902,6 +1928,24 @@ export default function ScannerApp() {
             setSavedQuestions(prev => prev.map(q => ({ ...q, isSolving: false })));
         } finally {
             setIsProcessingSolutions(false);
+        }
+
+        // Send to WhatsApp strictly after all solve/save operations have completed
+        if (newlySolvedList.length > 0) {
+            try {
+                const whatsappPayload = newlySolvedList.map(q => ({
+                    questionNumber: q.questionNumber,
+                    text: q.text,
+                    solution: q.solution,
+                }));
+                await fetch("/api/whatsapp/send-solutions", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ solutions: whatsappPayload, delaySeconds: 0, blockDelaySeconds: 0 }),
+                });
+            } catch (e) {
+                console.warn("[WhatsApp] Manual solve dispatch failed:", e);
+            }
         }
     };
 
@@ -2143,91 +2187,62 @@ export default function ScannerApp() {
 
                     {!imageSolveMode ? (
                         <div className="scan-polling-container">
-                            {savedQuestions.some(q => !!q.solution) ? (
-                                <div className={`polling-status-card ${darknessStatus}`}>
-                                    <div className="polling-status-header">
-                                        <span className={`status-indicator-dot ${darknessStatus}`}></span>
-                                        <span className="status-indicator-title">
-                                            {darknessStatus === "covering"
-                                                ? darknessDuration >= 3.5 && darknessDuration < 7.5
-                                                    ? "Ready! Release to switch question"
-                                                    : darknessDuration >= 7.5
-                                                        ? `⚠️ Hold reached: Release to RESET ALL (${(10 - darknessDuration).toFixed(0)}s)`
-                                                        : `Covered (${darknessDuration.toFixed(1)}s / 3.5s)`
+                            <div className={`polling-status-card ${darknessStatus} ${countdown !== null ? 'counting' : ''}`}>
+                                <div className="polling-status-header">
+                                    <span className={`status-indicator-dot ${darknessStatus}`}></span>
+                                    <span className="status-indicator-title">
+                                        {countdown !== null
+                                            ? `Scan Countdown: ${countdown}s`
+                                            : darknessStatus === "covering"
+                                                ? `Darkness Detected (${darknessDuration.toFixed(1)}s / 3.5s)`
                                                 : darknessStatus === "aborted"
-                                                    ? "Reset Complete"
-                                                    : "🖐️ Gestures Active (Silent Mode)"}
-                                        </span>
-                                    </div>
+                                                    ? "Scan Aborted (Misfire Protection)"
+                                                    : savedQuestions.length > 0
+                                                        ? `Auto-Scan Ready (${savedQuestions.length} saved)`
+                                                        : "Continuous Polling Active"}
+                                    </span>
+                                </div>
 
-                                    {/* Darkness Progress Bar towards 7.5s */}
+                                {/* Darkness Progress Bar (0 to 3.5s) */}
+                                {countdown === null && darknessStatus !== "aborted" && (
                                     <div className="darkness-meter-wrapper">
                                         <div
-                                            className={`darkness-meter-bar ${darknessDuration >= 7.5 ? 'reset-warning' : darknessDuration >= 3.5 ? 'armed' : ''}`}
-                                            style={{ width: `${Math.min(100, (darknessDuration / 7.5) * 100)}%` }}
+                                            className={`darkness-meter-bar ${darknessDuration >= 3.5 ? 'full armed' : ''}`}
+                                            style={{ width: `${Math.min(100, (darknessDuration / 3.5) * 100)}%` }}
                                         ></div>
                                     </div>
+                                )}
 
-                                    <p className="polling-status-desc">
-                                        {darknessAbortMessage || (
-                                            darknessStatus === "covering"
-                                                ? "Release between 3.5s to switch to next question. Hold for 7.5s to reset all problems."
-                                                : "🖐️ Cover camera for 3.5s & release to switch question. Cover for 7.5s to reset."
-                                        )}
-                                    </p>
-                                </div>
-                            ) : (
-                                <div className={`polling-status-card ${darknessStatus} ${countdown !== null ? 'counting' : ''}`}>
-                                    <div className="polling-status-header">
-                                        <span className={`status-indicator-dot ${darknessStatus}`}></span>
-                                        <span className="status-indicator-title">
-                                            {countdown !== null
-                                                ? `Scan Countdown: ${countdown}s`
-                                                : darknessStatus === "covering"
-                                                    ? `Darkness Detected (${darknessDuration.toFixed(1)}s / 3.5s)`
-                                                    : darknessStatus === "aborted"
-                                                        ? "Scan Aborted (Misfire Protection)"
-                                                        : "Continuous Polling Active"}
-                                        </span>
-                                    </div>
-
-                                    {/* Darkness Progress Bar (0 to 3.5s) */}
-                                    {countdown === null && darknessStatus !== "aborted" && (
-                                        <div className="darkness-meter-wrapper">
-                                            <div
-                                                className={`darkness-meter-bar ${darknessDuration >= 3.5 ? 'full armed' : ''}`}
-                                                style={{ width: `${Math.min(100, (darknessDuration / 3.5) * 100)}%` }}
-                                            ></div>
-                                        </div>
-                                    )}
-
-                                    <p className="polling-status-desc">
-                                        {countdown !== null ? (
-                                            darknessDuration > 0 ? (
-                                                "Camera is still covered! Uncover camera before countdown ends to scan."
-                                            ) : (
-                                                "Position paper in view! Capturing automatically when countdown ends..."
-                                            )
-                                        ) : darknessStatus === "covering" ? (
-                                            "Hold covered for 3.5 seconds to trigger scan countdown..."
-                                        ) : darknessStatus === "aborted" ? (
-                                            darknessAbortMessage || "Camera remained covered when countdown ended. Uncover camera to resume."
+                                <p className="polling-status-desc">
+                                    {countdown !== null ? (
+                                        darknessDuration > 0 ? (
+                                            "Camera is still covered! Uncover camera before countdown ends to scan."
                                         ) : (
-                                            "Cover camera with hand or object for 3.5 seconds to trigger scan."
-                                        )}
-                                    </p>
-
-                                    {countdown !== null && (
-                                        <button
-                                            type="button"
-                                            className="cancel-countdown-btn"
-                                            onClick={cancelScanCountdown}
-                                        >
-                                            ✕ Cancel Countdown
-                                        </button>
+                                            "Position paper in view! Capturing automatically when countdown ends..."
+                                        )
+                                    ) : darknessStatus === "covering" ? (
+                                        darknessDuration >= 3.5
+                                            ? "3.5s reached! Starting scan countdown..."
+                                            : `Hold covered for ${(3.5 - darknessDuration).toFixed(1)}s more to scan next batch...`
+                                    ) : darknessStatus === "aborted" ? (
+                                        darknessAbortMessage || "Camera remained covered when countdown ended. Uncover camera to resume."
+                                    ) : (
+                                        savedQuestions.length > 0
+                                            ? "Cover camera for 3.5s to scan next batch. New problems are added cumulatively."
+                                            : "Cover camera with hand or object for 3.5 seconds to trigger scan."
                                     )}
-                                </div>
-                            )}
+                                </p>
+
+                                {countdown !== null && (
+                                    <button
+                                        type="button"
+                                        className="cancel-countdown-btn"
+                                        onClick={cancelScanCountdown}
+                                    >
+                                        ✕ Cancel Countdown
+                                    </button>
+                                )}
+                            </div>
 
                             {/* Secondary manual trigger */}
                             <div className="manual-trigger-row">
@@ -2549,11 +2564,17 @@ export default function ScannerApp() {
 
             {/* Settings Overlay */}
             {isSettingsOpen && (
-                <div className="settings-overlay" onClick={() => setIsSettingsOpen(false)}>
+                <div className="settings-overlay" onClick={() => {
+                    setIsSettingsOpen(false);
+                    syncPromptsToServer(customSolvePrompt, customTranscribePrompt);
+                }}>
                     <div className="settings-modal" style={{ maxWidth: "640px", maxHeight: "88vh" }} onClick={e => e.stopPropagation()}>
                         <div className="settings-header">
                             <h3>Settings & Prompt Rules</h3>
-                            <button className="close-btn" onClick={() => setIsSettingsOpen(false)}>✕</button>
+                            <button className="close-btn" onClick={() => {
+                                setIsSettingsOpen(false);
+                                syncPromptsToServer(customSolvePrompt, customTranscribePrompt);
+                            }}>✕</button>
                         </div>
 
                         {/* Prompt Selector Tabs */}
@@ -2580,7 +2601,7 @@ export default function ScannerApp() {
                                     <label className="settings-label">
                                         AI Solve System Prompt
                                         <span className="settings-hint">
-                                            Defines how AI models solve the scanned questions. JSON formatting instructions are appended automatically.
+                                            Defines how AI models solve the scanned questions. JSON formatting instructions are appended automatically. Synced across all connected devices.
                                         </span>
                                     </label>
                                     <textarea
@@ -2591,10 +2612,16 @@ export default function ScannerApp() {
                                         placeholder={defaultSolvePrompt}
                                     />
                                     <div className="settings-actions">
-                                        <button className="reset-btn" onClick={() => setCustomSolvePrompt(defaultSolvePrompt)}>
+                                        <button className="reset-btn" onClick={() => {
+                                            setCustomSolvePrompt(defaultSolvePrompt);
+                                            syncPromptsToServer(defaultSolvePrompt, customTranscribePrompt);
+                                        }}>
                                             Reset Default
                                         </button>
-                                        <button className="process-btn" onClick={() => setIsSettingsOpen(false)}>
+                                        <button className="process-btn" onClick={() => {
+                                            setIsSettingsOpen(false);
+                                            syncPromptsToServer(customSolvePrompt, customTranscribePrompt);
+                                        }}>
                                             Done
                                         </button>
                                     </div>
@@ -2604,7 +2631,7 @@ export default function ScannerApp() {
                                     <label className="settings-label">
                                         Transcript Solution Encoder Rules (TTS Prompt)
                                         <span className="settings-hint">
-                                            Define the exact rules and guidelines used by the AI to convert written solutions into spoken dictation. Deepgram TTS speaks according to these rules.
+                                            Define the exact rules and guidelines used by the AI to convert written solutions into spoken dictation. Synced across all connected devices.
                                         </span>
                                     </label>
                                     <textarea
@@ -2624,11 +2651,15 @@ export default function ScannerApp() {
                                             onClick={() => {
                                                 setCustomTranscribePrompt(defaultTranscribePrompt);
                                                 audioDataCacheRef.current.clear();
+                                                syncPromptsToServer(customSolvePrompt, defaultTranscribePrompt);
                                             }}
                                         >
                                             Reset Default
                                         </button>
-                                        <button className="process-btn" onClick={() => setIsSettingsOpen(false)}>
+                                        <button className="process-btn" onClick={() => {
+                                            setIsSettingsOpen(false);
+                                            syncPromptsToServer(customSolvePrompt, customTranscribePrompt);
+                                        }}>
                                             Done
                                         </button>
                                     </div>
@@ -2783,10 +2814,10 @@ export default function ScannerApp() {
                                 </div>
                                 <div style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
                                     <span className="audio-loop-badge" style={{ background: "hsla(200, 70%, 40%, 0.25)", color: "hsl(200, 80%, 65%)", borderColor: "hsla(200, 70%, 40%, 0.4)" }}>
-                                        🖐️ Gestures Active
+                                        📚 Multi-Batch Sync
                                     </span>
                                     <span className="audio-loop-badge" style={{ background: "hsla(140, 70%, 40%, 0.2)", color: "hsl(140, 80%, 65%)", borderColor: "hsla(140, 70%, 40%, 0.35)" }}>
-                                        💬 WhatsApp: 120ch/5s
+                                        💬 WhatsApp: 120ch (Direct)
                                     </span>
                                     <span className="audio-loop-badge" style={{ background: "hsla(0, 0%, 30%, 0.3)", color: "hsl(0, 0%, 75%)", borderColor: "hsla(0, 0%, 40%, 0.4)" }}>
                                         🔇 Audio Muted
@@ -2809,7 +2840,7 @@ export default function ScannerApp() {
                                         type="button"
                                         className="audio-ctrl-btn primary"
                                         onClick={cycleNextSolution}
-                                        title="Next Question (or cover camera 3.5s & release)"
+                                        title="Next Question"
                                     >
                                         Next Question ⏭️
                                     </button>
@@ -2819,15 +2850,15 @@ export default function ScannerApp() {
                                     type="button"
                                     className="audio-ctrl-btn danger"
                                     onClick={clearAllQuestions}
-                                    title="Reset all questions and return to scan polling"
+                                    title="Clear all questions"
                                 >
-                                    🔄 Reset All
+                                    🗑️ Clear All
                                 </button>
                             </div>
 
                             <div className="audio-gesture-guide">
-                                <span>🖐️ <strong>Switch Question:</strong> Cover camera 3.5s & release</span>
-                                <span>🛑 <strong>Reset All:</strong> Cover camera 7.5s to wipe</span>
+                                <span>📸 <strong>Scan More:</strong> Cover camera 3.5s to capture additional problems</span>
+                                <span>🗑️ <strong>Clear:</strong> Use 🗑️ Clear All or ✕ on individual cards</span>
                             </div>
 
                             {audioStatusMessage && (

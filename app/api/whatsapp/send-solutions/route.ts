@@ -342,7 +342,7 @@ ${solutionText}
 export async function POST(req: NextRequest) {
     try {
         const body = await req.json();
-        const { solutions, delaySeconds = 30, blockDelaySeconds = 5 } = body;
+        const { solutions, delaySeconds = 0, blockDelaySeconds = 0 } = body;
 
         if (!solutions || !Array.isArray(solutions) || solutions.length === 0) {
             return NextResponse.json({ error: "No solutions provided" }, { status: 400 });
