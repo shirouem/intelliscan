@@ -206,32 +206,211 @@ function findSolutionForQuestion(q: ScannedQuestion, idx: number, solutionsMap: 
     return null;
 }
 
+function extractBalancedBraces(str: string, startIndex: number): { content: string; endIndex: number } | null {
+    if (str[startIndex] !== '{') return null;
+    let depth = 0;
+    for (let i = startIndex; i < str.length; i++) {
+        if (str[i] === '{') depth++;
+        else if (str[i] === '}') {
+            depth--;
+            if (depth === 0) {
+                return { content: str.substring(startIndex + 1, i), endIndex: i };
+            }
+        }
+    }
+    return null;
+}
+
+function replaceFractions(str: string): string {
+    let result = str;
+    let idx = result.indexOf("\\frac");
+    let safety = 0;
+    while (idx !== -1 && safety++ < 50) {
+        let cursor = idx + 5;
+        while (cursor < result.length && /\s/.test(result[cursor])) cursor++;
+        const numData = extractBalancedBraces(result, cursor);
+        if (!numData) {
+            idx = result.indexOf("\\frac", idx + 5);
+            continue;
+        }
+        cursor = numData.endIndex + 1;
+        while (cursor < result.length && /\s/.test(result[cursor])) cursor++;
+        const denData = extractBalancedBraces(result, cursor);
+        if (!denData) {
+            idx = result.indexOf("\\frac", idx + 5);
+            continue;
+        }
+
+        const num = replaceFractions(numData.content.trim());
+        const den = replaceFractions(denData.content.trim());
+        const replacement = `(${num}) / (${den})`;
+        result = result.substring(0, idx) + replacement + result.substring(denData.endIndex + 1);
+        idx = result.indexOf("\\frac");
+    }
+    return result;
+}
+
 /**
- * Parses inline formatting: superscripts (10^-6, r^2), subscripts (eps_0, v_d),
- * vectors, unit vectors, greek symbols, bold and code.
+ * Transforms raw LaTeX and technical notation for CBSE Class 12 Mathematics,
+ * Physics & Chemistry into clean, readable typography.
+ */
+function cleanMathAndPhysicsText(raw: string): string {
+    if (!raw) return "";
+
+    let text = raw;
+
+    // 1. Normalize LaTeX delimiters ($$, $, \[, \], \(, \))
+    text = text.replace(/\$\$([\s\S]*?)\$\$/g, "$1");
+    text = text.replace(/\\\[([\s\S]*?)\\\]/g, "$1");
+    text = text.replace(/\$([^\$]+)\$/g, "$1");
+    text = text.replace(/\\\(([^\)]+)\\\)/g, "$1");
+
+    // 2. Remove LaTeX text wrappers: \text{...}, \mathrm{...}, \mathbf{...}, \operatorname{...}
+    text = text.replace(/\\(?:text|mathrm|mathbf|mathit|operatorname)\{([^}]+)\}/g, "$1");
+
+    // 3. Remove LaTeX spacing: \, \; \! \quad \qquad
+    text = text.replace(/\\(?:quad|qquad|!)/g, " ");
+    text = text.replace(/\\([,;])/g, " ");
+
+    // 4. Remove \left and \right delimiters
+    text = text.replace(/\\left\s*([(\[{|.\\])/g, "$1");
+    text = text.replace(/\\right\s*([)\]}|.\\])/g, "$1");
+    text = text.replace(/\\left\b/g, "");
+    text = text.replace(/\\right\b/g, "");
+
+    // 5. Replace \frac{a}{b} with balanced brace parsing
+    text = replaceFractions(text);
+
+    // 6. Matrix & Determinant environments
+    text = text.replace(/\\begin\{(?:bmatrix|pmatrix|matrix)\}([\s\S]*?)\\end\{(?:bmatrix|pmatrix|matrix)\}/g, (_match, body) => {
+        const rows = body.trim().split(/\\\\|\n/).map((row: string) => row.trim().replace(/&/g, "  ")).filter(Boolean);
+        return `[ ${rows.join("  |  ")} ]`;
+    });
+    text = text.replace(/\\begin\{vmatrix\}([\s\S]*?)\\end\{vmatrix\}/g, (_match, body) => {
+        const rows = body.trim().split(/\\\\|\n/).map((row: string) => row.trim().replace(/&/g, "  ")).filter(Boolean);
+        return `| ${rows.join("  |  ")} |`;
+    });
+
+    // 7. Square roots: \sqrt{x} -> √(x), \sqrt[n]{x} -> ⁿ√(x)
+    text = text.replace(/\\sqrt\[(\d+)\]\{([^}]+)\}/g, "$1√($2)");
+    text = text.replace(/\\sqrt\{([^}]+)\}/g, "√($1)");
+    text = text.replace(/\bsqrt\(([^)]+)\)/g, "√($1)");
+
+    // 8. Inverse trig functions
+    text = text.replace(/\\?(?:sin)\s*\^?\s*\{?-1\}?/gi, "sin⁻¹");
+    text = text.replace(/\\?(?:cos)\s*\^?\s*\{?-1\}?/gi, "cos⁻¹");
+    text = text.replace(/\\?(?:tan)\s*\^?\s*\{?-1\}?/gi, "tan⁻¹");
+    text = text.replace(/\\?(?:cot)\s*\^?\s*\{?-1\}?/gi, "cot⁻¹");
+    text = text.replace(/\\?(?:sec)\s*\^?\s*\{?-1\}?/gi, "sec⁻¹");
+    text = text.replace(/\\?(?:csc|cosec)\s*\^?\s*\{?-1\}?/gi, "cosec⁻¹");
+
+    // 9. Standard trig, log, and exp
+    text = text.replace(/\\(sin|cos|tan|cot|sec|csc|cosec|ln|log|exp)\b/g, "$1");
+
+    // 10. Limits & Integrals
+    text = text.replace(/\\lim_\{([^}]+)\}/g, "lim ($1)");
+    text = text.replace(/\\lim\b/g, "lim");
+    text = text.replace(/\\int_\{([^}]+)\}\^\{([^}]+)\}/g, "∫_($1)^($2) ");
+    text = text.replace(/\\int_([a-zA-Z0-9]+)\^([a-zA-Z0-9]+)/g, "∫_($1)^($2) ");
+    text = text.replace(/\\iint\b/g, "∬");
+    text = text.replace(/\\oint\b/g, "∮");
+    text = text.replace(/\\int\b/g, "∫");
+    text = text.replace(/\bint\b/g, "∫");
+    text = text.replace(/\\partial\b/g, "∂");
+    text = text.replace(/\\nabla\b/g, "∇");
+
+    // 11. Vectors & Unit vectors
+    text = text.replace(/\\vec\{([a-zA-Z]+)\}/g, "$1⃗");
+    text = text.replace(/vec\(([a-zA-Z]+)\)/g, "$1⃗");
+    text = text.replace(/\\hat\{i\}|\bi_hat\b/g, "î");
+    text = text.replace(/\\hat\{j\}|\bj_hat\b/g, "ĵ");
+    text = text.replace(/\\hat\{k\}|\bk_hat\b/g, "k̂");
+    text = text.replace(/\\hat\{n\}|\bn_hat\b/g, "n̂");
+    text = text.replace(/\\hat\{r\}|\br_hat\b/g, "r̂");
+    text = text.replace(/\\hat\{([a-zA-Z]+)\}/g, "$1̂");
+    text = text.replace(/\\cdot\b/g, " · ");
+    text = text.replace(/\\times\b/g, " × ");
+
+    // 12. Matrices & Determinants
+    text = text.replace(/\\det\b/g, "det");
+    text = text.replace(/\\operatorname\{adj\}|\\adj\b/g, "adj");
+    text = text.replace(/\b([A-Z])\^\{-?1\}/g, "$1⁻¹");
+    text = text.replace(/\b([A-Z])\^-1\b/g, "$1⁻¹");
+    text = text.replace(/\b([A-Z])\^\{?T\}?\b/g, "$1ᵀ");
+
+    // 13. Sets, Relations & Logic
+    text = text.replace(/\\in\b/g, "∈");
+    text = text.replace(/\\notin\b/g, "∉");
+    text = text.replace(/\\subset\b/g, "⊂");
+    text = text.replace(/\\subseteq\b/g, "⊆");
+    text = text.replace(/\\cup\b/g, "∪");
+    text = text.replace(/\\cap\b/g, "∩");
+    text = text.replace(/\\emptyset\b|\\phi\b/g, "∅");
+    text = text.replace(/\\forall\b/g, "∀");
+    text = text.replace(/\\exists\b/g, "∃");
+
+    // 14. Arrows and Implication
+    text = text.replace(/\\implies\b/g, "⇒");
+    text = text.replace(/==>/g, "⇒");
+    text = text.replace(/=>/g, "⇒");
+    text = text.replace(/\\iff\b/g, "⇔");
+    text = text.replace(/<=>/g, "⇔");
+    text = text.replace(/\\to\b/g, "→");
+    text = text.replace(/-->/g, "→");
+    text = text.replace(/->/g, "→");
+
+    // 15. Common Math & Physics constants & symbols
+    text = text.replace(/\\therefore\b/g, "∴");
+    text = text.replace(/\\because\b/g, "∵");
+    text = text.replace(/\\pm\b/g, "±");
+    text = text.replace(/\+-/g, "±");
+    text = text.replace(/\\mp\b/g, "∓");
+    text = text.replace(/\\le\b|\\leq\b|<=/g, "≤");
+    text = text.replace(/\\ge\b|\\geq\b|>=/g, "≥");
+    text = text.replace(/\\neq\b|!=/g, "≠");
+    text = text.replace(/\\approx\b|~=/g, "≈");
+    text = text.replace(/\\equiv\b/g, "≡");
+    text = text.replace(/\\infty\b/g, "∞");
+    text = text.replace(/\\sum\b/g, "∑");
+    text = text.replace(/\\prod\b/g, "∏");
+    text = text.replace(/\\circ\b|\^\\circ/g, "°");
+    text = text.replace(/\\angle\b/g, "∠");
+    text = text.replace(/\\perp\b/g, "⊥");
+    text = text.replace(/\\parallel\b/g, "∥");
+
+    // 16. Greek letters
+    text = text.replace(/\\alpha\b/g, "α");
+    text = text.replace(/\\beta\b/g, "β");
+    text = text.replace(/\\gamma\b/g, "γ");
+    text = text.replace(/\\theta\b/g, "θ");
+    text = text.replace(/\\lambda\b/g, "λ");
+    text = text.replace(/\\mu_0\b/g, "μ₀");
+    text = text.replace(/\\mu\b/g, "μ");
+    text = text.replace(/\\pi\b/g, "π");
+    text = text.replace(/\\rho\b/g, "ρ");
+    text = text.replace(/\\sigma\b/g, "σ");
+    text = text.replace(/\\tau\b/g, "τ");
+    text = text.replace(/\\phi\b/g, "φ");
+    text = text.replace(/\\omega\b/g, "ω");
+    text = text.replace(/\\Delta\b/g, "Δ");
+    text = text.replace(/\b(?:eps_0|epsilon_0)\b|\\epsilon_0\b/g, "ε₀");
+    text = text.replace(/\\epsilon\b/g, "ε");
+
+    // 17. Exponents and subscripts
+    text = text.replace(/\^\{([^}]+)\}/g, "^($1)");
+    text = text.replace(/_\{([^}]+)\}/g, "_($1)");
+
+    return text;
+}
+
+/**
+ * Parses inline formatting: superscripts, subscripts, vectors, Greek symbols, bold, and code.
  */
 function renderInlineFormattedText(text: string): React.ReactNode {
     if (!text) return null;
 
-    // Normalize common physics/chemistry symbols & arrows
-    const processed = text
-        .replace(/-->/g, "→")
-        .replace(/->/g, "→")
-        .replace(/<=>/g, "⇄")
-        .replace(/\bi_hat\b/g, "î")
-        .replace(/\bj_hat\b/g, "ĵ")
-        .replace(/\bk_hat\b/g, "k̂")
-        .replace(/\br_hat\b/g, "r̂")
-        .replace(/\b(?:eps_0|epsilon_0)\b/g, "ε₀")
-        .replace(/\bmu_0\b/g, "μ₀")
-        .replace(/\bpi\b/g, "π")
-        .replace(/\btau\b/g, "τ")
-        .replace(/\blambda\b/g, "λ")
-        .replace(/\bDelta\b/g, "Δ")
-        .replace(/\boint\b/g, "∮")
-        .replace(/vec\(([a-zA-Z]+)\)/g, "$1⃗");
-
-    const tokenRegex = /(\*\*[^*]+\*\*|`[^`]+`|[a-zA-Z0-9\)]\^(?:[a-zA-Z0-9\+\-]+|\([a-zA-Z0-9\+\-]+\))|[a-zA-Z]_[a-zA-Z0-9]+|\*[^*]+\*)/g;
+    const processed = cleanMathAndPhysicsText(text);
+    const tokenRegex = /(\*\*[^*]+\*\*|`[^`]+`|\^(?:\([^)]+\)|[a-zA-Z0-9+-]+)|_(?:\([^)]+\)|[a-zA-Z0-9+-]+)|\*[^*]+\*)/g;
     const parts = processed.split(tokenRegex);
 
     return parts.map((part, i) => {
@@ -242,18 +421,15 @@ function renderInlineFormattedText(text: string): React.ReactNode {
         if (part.startsWith("`") && part.endsWith("`")) {
             return <code key={i} className="solution-code">{part.slice(1, -1)}</code>;
         }
-        if (part.includes("^") && !part.startsWith("*")) {
-            const caretIdx = part.indexOf("^");
-            const base = part.slice(0, caretIdx);
-            let exp = part.slice(caretIdx + 1);
+        if (part.startsWith("^") && !part.startsWith("*")) {
+            let exp = part.slice(1);
             if (exp.startsWith("(") && exp.endsWith(")")) exp = exp.slice(1, -1);
-            return <React.Fragment key={i}>{base}<sup>{exp}</sup></React.Fragment>;
+            return <sup key={i}>{exp}</sup>;
         }
-        if (part.includes("_") && !part.startsWith("*")) {
-            const underscoreIdx = part.indexOf("_");
-            const base = part.slice(0, underscoreIdx);
-            const sub = part.slice(underscoreIdx + 1);
-            return <React.Fragment key={i}>{base}<sub>{sub}</sub></React.Fragment>;
+        if (part.startsWith("_") && !part.startsWith("*")) {
+            let sub = part.slice(1);
+            if (sub.startsWith("(") && sub.endsWith(")")) sub = sub.slice(1, -1);
+            return <sub key={i}>{sub}</sub>;
         }
         if (part.startsWith("*") && part.endsWith("*") && part.length > 2) {
             return <em key={i} className="solution-italic">{part.slice(1, -1)}</em>;
@@ -290,32 +466,35 @@ function parseSolutionSections(solutionText: string): ParsedSection[] {
             return;
         }
 
-        const givenHeader = /^(?:\*{1,2}|#{1,4}\s*)?(?:Given|Given\s*Data|Known)\s*:?(?:\*{1,2})?:?\s*(.*)$/i.exec(line);
-        const formulaHeader = /^(?:\*{1,2}|#{1,4}\s*)?(?:Formula|Key\s*Formula|Governing\s*Formula|Principle|Law)\s*:?(?:\*{1,2})?:?\s*(.*)$/i.exec(line);
-        const stepsHeader = /^(?:\*{1,2}|#{1,4}\s*)?(?:Calculation|Substitution|Steps?|Step-by-step|Working)\s*:?(?:\*{1,2})?:?\s*(.*)$/i.exec(line);
-        const finalHeader = /^(?:\*{1,2}|#{1,4}\s*)?(?:Final\s*Answer|Final\s*Result|Answer|Ans)\s*:?(?:\*{1,2})?:?\s*(.*)$/i.exec(line);
+        const givenHeader = /^(?:\*{1,2}|#{1,4}\s*)?(?:Given|Given\s*Data|Known|To\s*Prove|To\s*Find|Problem\s*Statement)\s*:?(?:\*{1,2})?:?\s*(.*)$/i.exec(line);
+        const formulaHeader = /^(?:\*{1,2}|#{1,4}\s*)?(?:Formula|Key\s*Formula|Governing\s*Formula|Principle|Law|Theorem|Identit(?:y|ies)|Propert(?:y|ies)\s*Used)\s*:?(?:\*{1,2})?:?\s*(.*)$/i.exec(line);
+        const stepsHeader = /^(?:\*{1,2}|#{1,4}\s*)?(?:Calculation|Substitution|Steps?|Step-by-step|Working|Proof|Solution|Derivation)\s*:?(?:\*{1,2})?:?\s*(.*)$/i.exec(line);
+        const finalHeader = /^(?:\*{1,2}|#{1,4}\s*)?(?:Final\s*Answer|Final\s*Result|Answer|Ans|Hence\s*Proved|Conclusion|Result)\s*:?(?:\*{1,2})?:?\s*(.*)$/i.exec(line);
 
         if (finalHeader) {
             finalizeSection();
-            currentSection = { type: "final", title: "🎯 Final Answer", lines: [] };
+            const title = /hence\s*proved/i.test(line) ? "🎯 Hence Proved / Conclusion" : "🎯 Final Answer";
+            currentSection = { type: "final", title, lines: [] };
             if (finalHeader[1] && finalHeader[1].trim()) {
                 currentSection.lines.push(finalHeader[1].trim());
             }
         } else if (formulaHeader) {
             finalizeSection();
-            currentSection = { type: "formula", title: "📐 Formula & Law", lines: [] };
+            currentSection = { type: "formula", title: "📐 Formula & Identities", lines: [] };
             if (formulaHeader[1] && formulaHeader[1].trim()) {
                 currentSection.lines.push(formulaHeader[1].trim());
             }
         } else if (givenHeader) {
             finalizeSection();
-            currentSection = { type: "given", title: "📋 Given Parameters", lines: [] };
+            const title = /to\s*prove/i.test(line) ? "📋 Given & To Prove" : "📋 Given Parameters";
+            currentSection = { type: "given", title, lines: [] };
             if (givenHeader[1] && givenHeader[1].trim()) {
                 currentSection.lines.push(givenHeader[1].trim());
             }
         } else if (stepsHeader) {
             finalizeSection();
-            currentSection = { type: "steps", title: "🔢 Step-by-Step Calculation", lines: [] };
+            const title = /proof/i.test(line) ? "🔢 Step-by-Step Proof" : "🔢 Step-by-Step Working";
+            currentSection = { type: "steps", title, lines: [] };
             if (stepsHeader[1] && stepsHeader[1].trim()) {
                 currentSection.lines.push(stepsHeader[1].trim());
             }
@@ -362,7 +541,11 @@ function renderSectionLines(lines: string[], type: string): React.ReactNode[] {
 
         flushList(`fl-pre-${idx}`);
 
-        if (type === "formula" || /^(?:vec\([a-zA-Z]+\)|[a-zA-Z]\s*=|[A-Z]_[a-z0-9]+\s*=|\bE\b|\bF\b|\bV\b|\bC\b|\bI\b|\bB\b)\s*=/i.test(trimmed)) {
+        const isEquation = type === "formula" ||
+            /^(?:vec\([a-zA-Z]+\)|[a-zA-Z]\s*=|dy\/dx\b|d\^?2y\/dx\^?2|∫|lim\b|LHS\b|RHS\b|det\b|adj\b|P\([A-Z]|\b[A-Z]_[a-z0-9]+\s*=|⇒|∴|∵|\b[a-zA-Z]\s*[=<>≤≥]\s*)/i.test(trimmed) ||
+            (trimmed.includes("=") && trimmed.length < 90 && !trimmed.endsWith(":") && !trimmed.startsWith("Step"));
+
+        if (isEquation) {
             elements.push(
                 <div key={`eq-${idx}`} className="solution-equation-line">
                     {renderInlineFormattedText(trimmed)}
@@ -2488,6 +2671,38 @@ export default function ScannerApp() {
                         </div>
 
                         <div className="settings-content" style={{ overflowY: "auto", flex: 1, padding: "1.25rem 1.5rem" }}>
+                            {/* WhatsApp Integration Setting */}
+                            <div className="settings-field" style={{ marginBottom: "1.5rem", paddingBottom: "1.25rem", borderBottom: "1px solid hsla(0, 0%, 100%, 0.1)" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                    <div>
+                                        <div style={{ fontWeight: 600, fontSize: "0.95rem", color: "hsl(var(--text-primary))", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                            <span>💬 WhatsApp Forwarding</span>
+                                            <span style={{ fontSize: "0.75rem", padding: "0.15rem 0.5rem", borderRadius: "10px", background: sendToWhatsApp ? "hsla(140, 70%, 40%, 0.2)" : "hsla(0, 0%, 40%, 0.2)", color: sendToWhatsApp ? "hsl(140, 80%, 65%)" : "hsl(0, 0%, 65%)" }}>
+                                                {sendToWhatsApp ? "Enabled" : "Disabled"}
+                                            </span>
+                                        </div>
+                                        <span className="settings-hint" style={{ marginTop: "0.25rem", display: "block" }}>
+                                            Automatically forward solved questions & answers to WhatsApp after solving completes.
+                                        </span>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        className={`whatsapp-toggle-btn ${sendToWhatsApp ? "enabled" : "disabled"}`}
+                                        onClick={() => {
+                                            setSendToWhatsApp(prev => {
+                                                const next = !prev;
+                                                localStorage.setItem("scannerApp_sendToWhatsApp", String(next));
+                                                return next;
+                                            });
+                                        }}
+                                        style={{ padding: "0.5rem 1rem", fontSize: "0.85rem" }}
+                                    >
+                                        <span className="toggle-dot" />
+                                        <span>{sendToWhatsApp ? "ON" : "OFF"}</span>
+                                    </button>
+                                </div>
+                            </div>
+
                             <label className="settings-label">
                                 AI Solve System Prompt
                                 <span className="settings-hint">
@@ -2673,22 +2888,6 @@ export default function ScannerApp() {
                         </div>
 
                         <div className="questions-toolbar-actions">
-                            <button
-                                type="button"
-                                className={`whatsapp-toggle-btn ${sendToWhatsApp ? "enabled" : "disabled"}`}
-                                onClick={() => {
-                                    setSendToWhatsApp(prev => {
-                                        const next = !prev;
-                                        localStorage.setItem("scannerApp_sendToWhatsApp", String(next));
-                                        return next;
-                                    });
-                                }}
-                                title={sendToWhatsApp ? "WhatsApp forwarding is ON" : "WhatsApp forwarding is OFF"}
-                            >
-                                <span className="toggle-dot" />
-                                <span>WhatsApp: {sendToWhatsApp ? "ON" : "OFF"}</span>
-                            </button>
-
                             {savedQuestions.some(q => !!q.solution) && (
                                 <>
                                     <button
