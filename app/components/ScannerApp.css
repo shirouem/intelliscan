@@ -2174,6 +2174,141 @@
     font-size: 0.82rem;
 }
 
+.steps-box {
+    background: hsla(215, 40%, 35%, 0.08);
+    border: 1px solid hsla(215, 40%, 45%, 0.22);
+    border-left: 3px solid hsl(215, 75%, 60%);
+}
+
+.steps-tag {
+    color: hsl(215, 75%, 70%);
+}
+
+.steps-content {
+    color: hsl(var(--text-primary));
+    font-size: 0.84rem;
+}
+
+.general-box {
+    background: hsla(0, 0%, 20%, 0.15);
+    border: 1px solid hsla(0, 0%, 30%, 0.2);
+    border-left: 3px solid hsl(0, 0%, 50%);
+}
+
+.solution-list {
+    margin: 0.3rem 0 0.3rem 1.25rem;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.solution-list-item {
+    line-height: 1.5;
+    color: hsl(var(--text-primary));
+}
+
+.solution-equation-line {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    background: hsla(0, 0%, 0%, 0.35);
+    padding: 0.4rem 0.65rem;
+    border-radius: var(--radius-sm);
+    margin: 0.25rem 0;
+    display: block;
+    color: hsl(205, 90%, 75%);
+    border: 1px solid hsla(205, 80%, 60%, 0.2);
+    font-size: 0.86rem;
+    overflow-x: auto;
+}
+
+.solution-bold {
+    font-weight: 700;
+    color: hsl(var(--text-primary));
+}
+
+.solution-italic {
+    font-style: italic;
+    color: hsl(var(--text-secondary));
+}
+
+.solution-code {
+    font-family: ui-monospace, monospace;
+    font-size: 0.85em;
+    background: hsla(0, 0%, 100%, 0.1);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    color: hsl(var(--accent-secondary));
+}
+
+.formatted-solution-container sup {
+    font-size: 0.72em;
+    vertical-align: super;
+    line-height: 0;
+    color: hsl(45, 90%, 65%);
+    font-weight: 600;
+}
+
+.formatted-solution-container sub {
+    font-size: 0.72em;
+    vertical-align: sub;
+    line-height: 0;
+    color: hsl(205, 80%, 70%);
+}
+
+/* ─── WhatsApp Toggle Button ─────────────────────────────────────────────── */
+.whatsapp-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--radius-full);
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    user-select: none;
+}
+
+.whatsapp-toggle-btn.enabled {
+    background: hsla(140, 70%, 40%, 0.18);
+    border: 1px solid hsla(140, 70%, 50%, 0.4);
+    color: hsl(140, 80%, 65%);
+}
+
+.whatsapp-toggle-btn.enabled:hover {
+    background: hsla(140, 70%, 40%, 0.28);
+    box-shadow: 0 0 8px hsla(140, 70%, 50%, 0.3);
+}
+
+.whatsapp-toggle-btn.disabled {
+    background: hsla(0, 0%, 25%, 0.25);
+    border: 1px solid hsla(0, 0%, 40%, 0.3);
+    color: hsl(0, 0%, 60%);
+    opacity: 0.75;
+}
+
+.whatsapp-toggle-btn.disabled:hover {
+    background: hsla(0, 0%, 30%, 0.35);
+    color: hsl(0, 0%, 75%);
+    opacity: 1;
+}
+
+.whatsapp-toggle-btn .toggle-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    transition: background 0.2s ease;
+}
+
+.whatsapp-toggle-btn.enabled .toggle-dot {
+    background: hsl(140, 80%, 55%);
+    box-shadow: 0 0 6px hsl(140, 80%, 55%);
+}
+
+.whatsapp-toggle-btn.disabled .toggle-dot {
+    background: hsl(0, 0%, 45%);
+}
+
 /* ─── Darkness Meter Dynamic Stages ───────────────────────────────────────── */
 .darkness-meter-bar.armed {
     background: linear-gradient(90deg, hsl(140, 80%, 50%), hsl(160, 90%, 55%)) !important;

@@ -2,7 +2,7 @@
 
 import React, { useRef, useState, useCallback, useEffect } from "react";
 import "./ScannerApp.css";
-import { DEFAULT_SOLVE_PROMPT, DEFAULT_TRANSCRIBE_PROMPT } from "@/app/constants/prompts";
+import { DEFAULT_SOLVE_PROMPT } from "@/app/constants/prompts";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface ScannedQuestion {
@@ -145,16 +145,6 @@ const readImageSolveResponse = async (response: Response): Promise<ImageSolveSta
     }
 };
 
-// ─── Silent Mode Helper Functions (Zero Audio / Zero Feedback) ────────────────
-const playBoopSound = () => {};
-const playCancelSound = () => {};
-const playRefreshArmedSound = () => {};
-const getTranscribeStartAudio = () => null;
-const getTranscribeDoneAudio = () => null;
-const playTranscribeStartSound = () => {};
-const playTranscribeDoneSound = () => {};
-
-
 /**
  * Resilient solution key matcher that handles any AI formatting:
  * e.g. "q1", "1", "question1", "Question 1", or positional array index.
@@ -217,74 +207,209 @@ function findSolutionForQuestion(q: ScannedQuestion, idx: number, solutionsMap: 
 }
 
 /**
- * Renders technical and CBSE Class 12 Physics & Chemistry solutions with structured visual hierarchy
+ * Parses inline formatting: superscripts (10^-6, r^2), subscripts (eps_0, v_d),
+ * vectors, unit vectors, greek symbols, bold and code.
  */
-function renderFormattedSolution(solutionText?: string) {
-    if (!solutionText) return null;
+function renderInlineFormattedText(text: string): React.ReactNode {
+    if (!text) return null;
+
+    // Normalize common physics/chemistry symbols & arrows
+    const processed = text
+        .replace(/-->/g, "→")
+        .replace(/->/g, "→")
+        .replace(/<=>/g, "⇄")
+        .replace(/\bi_hat\b/g, "î")
+        .replace(/\bj_hat\b/g, "ĵ")
+        .replace(/\bk_hat\b/g, "k̂")
+        .replace(/\br_hat\b/g, "r̂")
+        .replace(/\b(?:eps_0|epsilon_0)\b/g, "ε₀")
+        .replace(/\bmu_0\b/g, "μ₀")
+        .replace(/\bpi\b/g, "π")
+        .replace(/\btau\b/g, "τ")
+        .replace(/\blambda\b/g, "λ")
+        .replace(/\bDelta\b/g, "Δ")
+        .replace(/\boint\b/g, "∮")
+        .replace(/vec\(([a-zA-Z]+)\)/g, "$1⃗");
+
+    const tokenRegex = /(\*\*[^*]+\*\*|`[^`]+`|[a-zA-Z0-9\)]\^(?:[a-zA-Z0-9\+\-]+|\([a-zA-Z0-9\+\-]+\))|[a-zA-Z]_[a-zA-Z0-9]+|\*[^*]+\*)/g;
+    const parts = processed.split(tokenRegex);
+
+    return parts.map((part, i) => {
+        if (!part) return null;
+        if (part.startsWith("**") && part.endsWith("**")) {
+            return <strong key={i} className="solution-bold">{part.slice(2, -2)}</strong>;
+        }
+        if (part.startsWith("`") && part.endsWith("`")) {
+            return <code key={i} className="solution-code">{part.slice(1, -1)}</code>;
+        }
+        if (part.includes("^") && !part.startsWith("*")) {
+            const caretIdx = part.indexOf("^");
+            const base = part.slice(0, caretIdx);
+            let exp = part.slice(caretIdx + 1);
+            if (exp.startsWith("(") && exp.endsWith(")")) exp = exp.slice(1, -1);
+            return <React.Fragment key={i}>{base}<sup>{exp}</sup></React.Fragment>;
+        }
+        if (part.includes("_") && !part.startsWith("*")) {
+            const underscoreIdx = part.indexOf("_");
+            const base = part.slice(0, underscoreIdx);
+            const sub = part.slice(underscoreIdx + 1);
+            return <React.Fragment key={i}>{base}<sub>{sub}</sub></React.Fragment>;
+        }
+        if (part.startsWith("*") && part.endsWith("*") && part.length > 2) {
+            return <em key={i} className="solution-italic">{part.slice(1, -1)}</em>;
+        }
+        return <React.Fragment key={i}>{part}</React.Fragment>;
+    });
+}
+
+interface ParsedSection {
+    type: "given" | "formula" | "steps" | "final" | "general";
+    title: string;
+    lines: string[];
+}
+
+function parseSolutionSections(solutionText: string): ParsedSection[] {
+    if (!solutionText) return [];
 
     const lines = solutionText.split("\n");
-    const elements: React.ReactNode[] = [];
-    let currentParagraph: string[] = [];
+    const sections: ParsedSection[] = [];
+    let currentSection: ParsedSection = { type: "general", title: "", lines: [] };
 
-    const flushParagraph = (key: string) => {
-        if (currentParagraph.length > 0) {
+    const finalizeSection = () => {
+        if (currentSection.lines.some(l => l.trim().length > 0)) {
+            sections.push(currentSection);
+        }
+    };
+
+    lines.forEach(rawLine => {
+        const line = rawLine.trim();
+        if (!line) {
+            if (currentSection.lines.length > 0 && currentSection.lines[currentSection.lines.length - 1] !== "") {
+                currentSection.lines.push("");
+            }
+            return;
+        }
+
+        const givenHeader = /^(?:\*{1,2}|#{1,4}\s*)?(?:Given|Given\s*Data|Known)\s*:?(?:\*{1,2})?:?\s*(.*)$/i.exec(line);
+        const formulaHeader = /^(?:\*{1,2}|#{1,4}\s*)?(?:Formula|Key\s*Formula|Governing\s*Formula|Principle|Law)\s*:?(?:\*{1,2})?:?\s*(.*)$/i.exec(line);
+        const stepsHeader = /^(?:\*{1,2}|#{1,4}\s*)?(?:Calculation|Substitution|Steps?|Step-by-step|Working)\s*:?(?:\*{1,2})?:?\s*(.*)$/i.exec(line);
+        const finalHeader = /^(?:\*{1,2}|#{1,4}\s*)?(?:Final\s*Answer|Final\s*Result|Answer|Ans)\s*:?(?:\*{1,2})?:?\s*(.*)$/i.exec(line);
+
+        if (finalHeader) {
+            finalizeSection();
+            currentSection = { type: "final", title: "🎯 Final Answer", lines: [] };
+            if (finalHeader[1] && finalHeader[1].trim()) {
+                currentSection.lines.push(finalHeader[1].trim());
+            }
+        } else if (formulaHeader) {
+            finalizeSection();
+            currentSection = { type: "formula", title: "📐 Formula & Law", lines: [] };
+            if (formulaHeader[1] && formulaHeader[1].trim()) {
+                currentSection.lines.push(formulaHeader[1].trim());
+            }
+        } else if (givenHeader) {
+            finalizeSection();
+            currentSection = { type: "given", title: "📋 Given Parameters", lines: [] };
+            if (givenHeader[1] && givenHeader[1].trim()) {
+                currentSection.lines.push(givenHeader[1].trim());
+            }
+        } else if (stepsHeader) {
+            finalizeSection();
+            currentSection = { type: "steps", title: "🔢 Step-by-Step Calculation", lines: [] };
+            if (stepsHeader[1] && stepsHeader[1].trim()) {
+                currentSection.lines.push(stepsHeader[1].trim());
+            }
+        } else {
+            currentSection.lines.push(line);
+        }
+    });
+
+    finalizeSection();
+    return sections;
+}
+
+function renderSectionLines(lines: string[], type: string): React.ReactNode[] {
+    const elements: React.ReactNode[] = [];
+    let listBuffer: string[] = [];
+
+    const flushList = (keyPrefix: string) => {
+        if (listBuffer.length > 0) {
             elements.push(
-                <p key={key} className="solution-paragraph">
-                    {currentParagraph.map((line, lIdx) => (
-                        <React.Fragment key={lIdx}>
-                            {line}
-                            {lIdx < currentParagraph.length - 1 && <br />}
-                        </React.Fragment>
+                <ul key={`${keyPrefix}-list`} className="solution-list">
+                    {listBuffer.map((item, lIdx) => (
+                        <li key={lIdx} className="solution-list-item">
+                            {renderInlineFormattedText(item)}
+                        </li>
                     ))}
-                </p>
+                </ul>
             );
-            currentParagraph = [];
+            listBuffer = [];
         }
     };
 
     lines.forEach((line, idx) => {
         const trimmed = line.trim();
         if (!trimmed) {
-            flushParagraph(`p-${idx}`);
+            flushList(`fl-${idx}`);
             return;
         }
 
-        const finalMatch = /^\*?(?:Final\s*Answer|Answer|Ans)\s*:?\*?\s*(.*)/i.exec(trimmed);
-        const formulaMatch = /^\*?(?:Formula|Key\s*Formula|Principle|Law)\s*:?\*?\s*(.*)/i.exec(trimmed);
-        const givenMatch = /^\*?(?:Given|Given\s*Data)\s*:?\*?\s*(.*)/i.exec(trimmed);
-
-        if (finalMatch) {
-            flushParagraph(`pre-final-${idx}`);
-            elements.push(
-                <div key={`final-${idx}`} className="solution-section final-answer-box">
-                    <span className="section-tag final-tag">🎯 Final Answer</span>
-                    <div className="section-content final-content">{finalMatch[1] || trimmed}</div>
-                </div>
-            );
-        } else if (formulaMatch) {
-            flushParagraph(`pre-form-${idx}`);
-            elements.push(
-                <div key={`form-${idx}`} className="solution-section formula-box">
-                    <span className="section-tag formula-tag">📐 Formula</span>
-                    <div className="section-content formula-content">{formulaMatch[1] || trimmed}</div>
-                </div>
-            );
-        } else if (givenMatch) {
-            flushParagraph(`pre-given-${idx}`);
-            elements.push(
-                <div key={`given-${idx}`} className="solution-section given-box">
-                    <span className="section-tag given-tag">📋 Given</span>
-                    <div className="section-content given-content">{givenMatch[1] || trimmed}</div>
-                </div>
-            );
-        } else {
-            currentParagraph.push(line);
+        const bulletMatch = /^(?:[-*•]|\d+\.)\s+(.*)/.exec(trimmed);
+        if (bulletMatch) {
+            listBuffer.push(bulletMatch[1]);
+            return;
         }
+
+        flushList(`fl-pre-${idx}`);
+
+        if (type === "formula" || /^(?:vec\([a-zA-Z]+\)|[a-zA-Z]\s*=|[A-Z]_[a-z0-9]+\s*=|\bE\b|\bF\b|\bV\b|\bC\b|\bI\b|\bB\b)\s*=/i.test(trimmed)) {
+            elements.push(
+                <div key={`eq-${idx}`} className="solution-equation-line">
+                    {renderInlineFormattedText(trimmed)}
+                </div>
+            );
+            return;
+        }
+
+        elements.push(
+            <p key={`p-${idx}`} className="solution-paragraph">
+                {renderInlineFormattedText(trimmed)}
+            </p>
+        );
     });
 
-    flushParagraph("final-paragraph");
+    flushList("fl-end");
+    return elements;
+}
 
-    return <div className="formatted-solution-container">{elements}</div>;
+/**
+ * Renders technical and CBSE Class 12 Physics & Chemistry solutions with structured visual hierarchy
+ */
+function renderFormattedSolution(solutionText?: string) {
+    if (!solutionText) return null;
+
+    const sections = parseSolutionSections(solutionText);
+
+    return (
+        <div className="formatted-solution-container">
+            {sections.map((sec, sIdx) => {
+                let boxClass = "general-box";
+                if (sec.type === "final") boxClass = "final-answer-box";
+                else if (sec.type === "formula") boxClass = "formula-box";
+                else if (sec.type === "given") boxClass = "given-box";
+                else if (sec.type === "steps") boxClass = "steps-box";
+
+                return (
+                    <div key={`sec-${sIdx}`} className={`solution-section ${boxClass}`}>
+                        {sec.title && <span className={`section-tag ${sec.type}-tag`}>{sec.title}</span>}
+                        <div className={`section-content ${sec.type}-content`}>
+                            {renderSectionLines(sec.lines, sec.type)}
+                        </div>
+                    </div>
+                );
+            })}
+        </div>
+    );
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -301,6 +426,7 @@ export default function ScannerApp() {
     const darknessStartTimeRef = useRef<number | null>(null);
     const abortedDueToLongDarknessRef = useRef<boolean>(false);
     const countdownTriggeredByDarknessRef = useRef<boolean>(false);
+    const lightTicksRef = useRef<number>(0);
 
     // ── Scan mode ─────────────────────────────────────────────────────────────
     const [isCapturing, setIsCapturing] = useState(false);
@@ -311,18 +437,11 @@ export default function ScannerApp() {
     const [activeTab, setActiveTab] = useState<"all" | "unsolved" | "solved">("all");
     const [bottomTab, setBottomTab] = useState<"questions" | "imagesolve">("questions");
 
-    // ── Settings ──────────────────────────────────────────────────────────────
+    // ── WhatsApp & Settings ───────────────────────────────────────────────────
+    const [sendToWhatsApp, setSendToWhatsApp] = useState<boolean>(true);
     const defaultSolvePrompt = DEFAULT_SOLVE_PROMPT;
-    const defaultTranscribePrompt = DEFAULT_TRANSCRIBE_PROMPT;
     const [customSolvePrompt, setCustomSolvePrompt] = useState(DEFAULT_SOLVE_PROMPT);
-    const [customTranscribePrompt, setCustomTranscribePrompt] = useState(DEFAULT_TRANSCRIBE_PROMPT);
-    const [settingsTab, setSettingsTab] = useState<"solve" | "transcribe">("solve");
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-    const customTranscribePromptRef = useRef(customTranscribePrompt);
-
-    useEffect(() => {
-        customTranscribePromptRef.current = customTranscribePrompt;
-    }, [customTranscribePrompt]);
 
     // ── Edit mode ─────────────────────────────────────────────────────────────
     const [editingId, setEditingId] = useState<string | null>(null);
@@ -336,27 +455,8 @@ export default function ScannerApp() {
     const [darknessStatus, setDarknessStatus] = useState<"idle" | "covering" | "countdown" | "aborted">("idle");
     const [darknessAbortMessage, setDarknessAbortMessage] = useState<string | null>(null);
 
-    // ── Spoken Audio Playback & Looping ───────────────────────────────────────
-    const [activeAudioIndex, setActiveAudioIndex] = useState<number | null>(null);
-    const [isAudioPlaying, setIsAudioPlaying] = useState<boolean>(false);
-    const [speechRate, setSpeechRate] = useState<number>(0.8);
-    const [audioStatusMessage, setAudioStatusMessage] = useState<string | null>(null);
-    const currentAudioRef = useRef<HTMLAudioElement | null>(null);
-    const speechUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
-    const isLoopingRef = useRef<boolean>(true);
-    const audioDataCacheRef = useRef<Map<string, { audioDataUrl?: string | null; transcript: string; spokenText: string; questionIntro?: string }>>(new Map());
-    const audioPlayTokenRef = useRef<number>(0);
-    const isRefreshArmedRef = useRef<boolean>(false);
-    const inFlightTranscribeRef = useRef<Map<string, Promise<any>>>(new Map());
     const savedQuestionsRef = useRef<ScannedQuestion[]>([]);
-    const activeAudioIndexRef = useRef<number | null>(null);
-    const consecutiveLightTicksRef = useRef<number>(0);
-    const speechRateRef = useRef<number>(0.8);
-    const audioLoopTimerRef = useRef<NodeJS.Timeout | null>(null);
-
-    speechRateRef.current = speechRate;
     savedQuestionsRef.current = savedQuestions;
-    activeAudioIndexRef.current = activeAudioIndex;
 
     // ── Multi-Device Sync & Solved UX States ──────────────────────────────────
     const lastServerUpdatedAtRef = useRef<number | null>(null);
@@ -452,8 +552,8 @@ export default function ScannerApp() {
         const storedPrompt = localStorage.getItem("scannerApp_solvePrompt");
         if (storedPrompt) setCustomSolvePrompt(storedPrompt);
 
-        const storedTranscribePrompt = localStorage.getItem("scannerApp_transcribePrompt");
-        if (storedTranscribePrompt) setCustomTranscribePrompt(storedTranscribePrompt);
+        const storedWhatsApp = localStorage.getItem("scannerApp_sendToWhatsApp");
+        if (storedWhatsApp !== null) setSendToWhatsApp(storedWhatsApp === "true");
 
         const storedOrder = localStorage.getItem("scannerApp_imageSolveProviderOrder");
         if (storedOrder) {
@@ -491,11 +591,11 @@ export default function ScannerApp() {
         if (isLoaded) {
             localStorage.setItem("scannerApp_savedQuestions", JSON.stringify(savedQuestions));
             localStorage.setItem("scannerApp_solvePrompt", customSolvePrompt);
-            localStorage.setItem("scannerApp_transcribePrompt", customTranscribePrompt);
+            localStorage.setItem("scannerApp_sendToWhatsApp", String(sendToWhatsApp));
             localStorage.setItem("scannerApp_imageSolveProviderOrder", JSON.stringify(imageSolveProviderOrder));
             localStorage.setItem("scannerApp_imageSolveProviderEnabled", JSON.stringify(imageSolveProviderEnabled));
         }
-    }, [savedQuestions, customSolvePrompt, customTranscribePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, isLoaded]);
+    }, [savedQuestions, customSolvePrompt, sendToWhatsApp, imageSolveProviderOrder, imageSolveProviderEnabled, isLoaded]);
 
     // ── Server Sync Functions ─────────────────────────────────────────────────
     const syncQuestionsToServer = useCallback(async (questions: ScannedQuestion[]) => {
@@ -516,12 +616,11 @@ export default function ScannerApp() {
         }
     }, []);
 
-    const syncPromptsToServer = useCallback(async (solvePrompt?: string, transcribePrompt?: string) => {
+    const syncPromptsToServer = useCallback(async (solvePrompt?: string) => {
         try {
             setSyncStatus("syncing");
             const body: Record<string, string> = {};
             if (typeof solvePrompt === "string") body.solvePrompt = solvePrompt;
-            if (typeof transcribePrompt === "string") body.transcribePrompt = transcribePrompt;
             const res = await fetch("/api/questions", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -614,15 +713,11 @@ export default function ScannerApp() {
                         }
                     }
 
-                    // Update prompts if settings modal is not open
+                    // Update prompt if settings modal is not open
                     if (!isSettingsOpenRef.current) {
                         if (typeof data.solvePrompt === "string" && data.solvePrompt.trim()) {
                             setCustomSolvePrompt(data.solvePrompt);
                             localStorage.setItem("scannerApp_solvePrompt", data.solvePrompt);
-                        }
-                        if (typeof data.transcribePrompt === "string" && data.transcribePrompt.trim()) {
-                            setCustomTranscribePrompt(data.transcribePrompt);
-                            localStorage.setItem("scannerApp_transcribePrompt", data.transcribePrompt);
                         }
                     }
                 }
@@ -640,17 +735,6 @@ export default function ScannerApp() {
             clearInterval(interval);
         };
     }, []);
-
-    // Auto-scroll active card into view
-    useEffect(() => {
-        if (activeAudioIndex === null) return;
-        const solvedList = savedQuestions.filter(q => !!q.solution);
-        const activeQ = solvedList[activeAudioIndex];
-        if (activeQ && questionCardRefs.current.has(activeQ.id)) {
-            const el = questionCardRefs.current.get(activeQ.id);
-            el?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-        }
-    }, [activeAudioIndex, savedQuestions]);
 
     const copyQuestionAndSolution = useCallback((q: ScannedQuestion, e: React.MouseEvent) => {
         e.stopPropagation();
@@ -887,138 +971,11 @@ export default function ScannerApp() {
         return { width: video.videoWidth, height: video.videoHeight };
     };
 
-    // ── Spoken Audio Playback Functions ───────────────────────────────────────
-    const stopCurrentAudio = useCallback(() => {
-        // Invalidate any active or in-flight transcribe / audio requests
-        audioPlayTokenRef.current += 1;
-
-        if (audioLoopTimerRef.current) {
-            clearTimeout(audioLoopTimerRef.current);
-            audioLoopTimerRef.current = null;
-        }
-
-        if (currentAudioRef.current) {
-            try {
-                currentAudioRef.current.pause();
-                currentAudioRef.current.currentTime = 0;
-                currentAudioRef.current.removeAttribute("src");
-                currentAudioRef.current.load();
-            } catch { }
-        }
-        if (typeof window !== "undefined" && "speechSynthesis" in window) {
-            try {
-                window.speechSynthesis.cancel();
-            } catch { }
-        }
-        speechUtteranceRef.current = null;
-        setIsAudioPlaying(false);
-    }, []);
-
-    const playBrowserSpeechFallback = useCallback((text: string, questionNumStr?: string) => {
-        // Silent mode - no browser speech synthesis audio
-    }, []);
-
-    const changeSpeechRate = useCallback((newRate: number) => {
-        const clamped = Math.max(0.5, Math.min(1.5, Math.round(newRate * 100) / 100));
-        setSpeechRate(clamped);
-        speechRateRef.current = clamped;
-        if (currentAudioRef.current) {
-            currentAudioRef.current.defaultPlaybackRate = clamped;
-            currentAudioRef.current.playbackRate = clamped;
-        }
-    }, []);
-
-    const rewindAudio = useCallback((seconds = 5) => {
-        if (currentAudioRef.current) {
-            currentAudioRef.current.currentTime = Math.max(0, currentAudioRef.current.currentTime - seconds);
-        }
-    }, []);
-
-    const forwardAudio = useCallback((seconds = 5) => {
-        if (currentAudioRef.current) {
-            currentAudioRef.current.currentTime = Math.min(
-                currentAudioRef.current.duration || 9999,
-                currentAudioRef.current.currentTime + seconds
-            );
-        }
-    }, []);
-
-    const prefetchRemainingAudio = useCallback(async (list: ScannedQuestion[], currentIndex: number) => {
-        // Silent mode - populate SAMPLE transcript instantly without network audio calls
-        for (let i = 0; i < list.length; i++) {
-            const q = list[i];
-            if (q && !audioDataCacheRef.current.has(q.id)) {
-                audioDataCacheRef.current.set(q.id, {
-                    audioDataUrl: null,
-                    transcript: "SAMPLE",
-                    spokenText: "SAMPLE",
-                    questionIntro: `Question ${q.questionNumber || i + 1}.`,
-                });
-            }
-        }
-    }, []);
-
-    const playQuestionAudio = useCallback(async (index: number, list?: ScannedQuestion[]) => {
-        const currentToken = ++audioPlayTokenRef.current;
-
-        const currentList = list || savedQuestionsRef.current.filter(q => !!q.solution);
-        if (!currentList || currentList.length === 0) {
-            setAudioStatusMessage("No solutions available.");
-            return;
-        }
-
-        const boundedIndex = ((index % currentList.length) + currentList.length) % currentList.length;
-        const targetQ = currentList[boundedIndex];
-        if (!targetQ || !targetQ.solution) {
-            setAudioStatusMessage(`Question ${boundedIndex + 1} has no solution.`);
-            return;
-        }
-
-        setActiveAudioIndex(boundedIndex);
-        const qNumStr = String(targetQ.questionNumber || boundedIndex + 1);
-        setAudioStatusMessage(`Question ${qNumStr} active (Silent Mode)`);
-
-        // Clear any pending repeat timer
-        if (audioLoopTimerRef.current) {
-            clearTimeout(audioLoopTimerRef.current);
-            audioLoopTimerRef.current = null;
-        }
-
-        // Stop any audio immediately to guarantee absolute silence
-        if (currentAudioRef.current) {
-            try {
-                currentAudioRef.current.pause();
-                currentAudioRef.current.currentTime = 0;
-                currentAudioRef.current.removeAttribute("src");
-            } catch { }
-        }
-        if (typeof window !== "undefined" && "speechSynthesis" in window) {
-            try { window.speechSynthesis.cancel(); } catch { }
-        }
-        setIsAudioPlaying(false);
-
-        // Store "SAMPLE" transcript and null audioDataUrl
-        audioDataCacheRef.current.set(targetQ.id, {
-            audioDataUrl: null,
-            transcript: "SAMPLE",
-            spokenText: "SAMPLE",
-            questionIntro: `Question ${qNumStr}.`,
-        });
-
-        setSavedQuestions(prev => prev.map(q => q.id === targetQ.id ? {
-            ...q,
-            transcript: "SAMPLE",
-            audioDataUrl: null,
-            questionIntro: `Question ${qNumStr}.`
-        } : q));
-        setExpandedSolutionIds(prev => new Set(prev).add(targetQ.id));
-    }, []);
-
-    const autoSolveAndPlay = useCallback(async (questionsToSolve: ScannedQuestion[]) => {
+    // ── Auto Solve Process ────────────────────────────────────────────────────
+    const autoSolveQuestions = useCallback(async (questionsToSolve: ScannedQuestion[]) => {
         if (!questionsToSolve || questionsToSolve.length === 0) return;
 
         setIsProcessingSolutions(true);
-        setAudioStatusMessage("Solving scanned questions with AI...");
 
         let solvedList: ScannedQuestion[] = [];
 
@@ -1041,7 +998,7 @@ export default function ScannerApp() {
             // Map solutions to newly solved batch
             const newlySolvedBatch = questionsToSolve.map((q, idx) => {
                 const sol = findSolutionForQuestion(q, idx, solutionsMap);
-                return sol ? { ...q, solution: sol, transcript: "SAMPLE", audioDataUrl: null, isSolving: false } : { ...q, isSolving: false };
+                return sol ? { ...q, solution: sol, isSolving: false } : { ...q, isSolving: false };
             });
 
             const newlySolvedMap = new Map<string, ScannedQuestion>(newlySolvedBatch.map(q => [q.id, q]));
@@ -1067,28 +1024,17 @@ export default function ScannerApp() {
                 questionsToSolve.forEach(q => next.add(q.id));
                 return next;
             });
-
-            if (solvedList.length > 0) {
-                // Focus the first question of this new batch silently
-                const solvedAll = allUpdated.filter(q => !!q.solution);
-                const targetIdx = solvedAll.findIndex(q => q.id === solvedList[0].id);
-                playQuestionAudio(targetIdx >= 0 ? targetIdx : 0, solvedAll);
-                setAudioStatusMessage(`Solved ${solvedList.length} new question(s) successfully (${solvedAll.length} total).`);
-            } else {
-                setAudioStatusMessage("No solutions generated for new batch.");
-            }
         } catch (err: unknown) {
             console.error("Auto solve failed:", err);
             setErrorMessage(getErrorMessage(err, "Failed to solve questions."));
-            setAudioStatusMessage("Solving failed: " + getErrorMessage(err));
             const failedIds = new Set(questionsToSolve.map(q => q.id));
             setSavedQuestions(prev => prev.map(q => failedIds.has(q.id) ? { ...q, isSolving: false } : q));
         } finally {
             setIsProcessingSolutions(false);
         }
 
-        // ── STRICTLY AFTER EVERYTHING ELSE HAS COMPLETED: Send to WhatsApp without delay ──
-        if (solvedList.length > 0) {
+        // ── STRICTLY AFTER EVERYTHING ELSE HAS COMPLETED: Send to WhatsApp (if enabled) ──
+        if (sendToWhatsApp && solvedList.length > 0) {
             console.log("[WhatsApp] Dispatching solutions strictly AFTER solve completion without delay...");
             try {
                 const whatsappPayload = solvedList.map(q => ({
@@ -1105,7 +1051,6 @@ export default function ScannerApp() {
                 const data = await res.json().catch(() => ({}));
                 if (data.ok) {
                     console.log("[WhatsApp] Solutions dispatched without delay:", data);
-                    setAudioStatusMessage(`All ${solvedList.length} solutions sent to WhatsApp.`);
                 } else {
                     console.warn("[WhatsApp] Dispatch warning:", data.error);
                 }
@@ -1113,35 +1058,7 @@ export default function ScannerApp() {
                 console.warn("[WhatsApp] Dispatch request failed:", e);
             }
         }
-    }, [customSolvePrompt, playQuestionAudio, syncQuestionsToServer]);
-
-    const toggleAudioPlayPause = useCallback(() => {
-        setIsAudioPlaying(false);
-        setAudioStatusMessage("Audio disabled (Silent Mode)");
-    }, []);
-
-    const cycleNextSolution = useCallback(() => {
-        const solved = savedQuestionsRef.current.filter(q => !!q.solution);
-        if (solved.length === 0) return;
-        const currentIdx = activeAudioIndexRef.current;
-        const nextIndex = currentIdx === null ? 0 : (currentIdx + 1) % solved.length;
-        playQuestionAudio(nextIndex, solved);
-    }, [playQuestionAudio]);
-
-    const cyclePrevSolution = useCallback(() => {
-        const solved = savedQuestionsRef.current.filter(q => !!q.solution);
-        if (solved.length === 0) return;
-        const currentIdx = activeAudioIndexRef.current;
-        const prevIndex = currentIdx === null ? 0 : (currentIdx - 1 + solved.length) % solved.length;
-        playQuestionAudio(prevIndex, solved);
-    }, [playQuestionAudio]);
-
-    // Clean up audio on unmount
-    useEffect(() => {
-        return () => {
-            stopCurrentAudio();
-        };
-    }, [stopCurrentAudio]);
+    }, [customSolvePrompt, sendToWhatsApp, syncQuestionsToServer]);
 
     // ── Scan mode capture ─────────────────────────────────────────────────────
     const capture = useCallback(async (autoTriggered = false) => {
@@ -1212,13 +1129,13 @@ export default function ScannerApp() {
             syncQuestionsToServer(cumulativeQuestions);
 
             // Automatically solve ONLY the new batch of questions
-            autoSolveAndPlay(assignedQuestions);
+            autoSolveQuestions(assignedQuestions);
         } catch (error: unknown) {
             console.error("Scan error:", error);
             setScanStatus("error");
             setErrorMessage(getErrorMessage(error, "Failed to process the question paper."));
         }
-    }, [captureHighQualityFrame, autoSolveAndPlay, syncQuestionsToServer]);
+    }, [captureHighQualityFrame, autoSolveQuestions, syncQuestionsToServer]);
 
     // ── Frame Darkness Detection ──────────────────────────────────────────────
     const checkFrameDarkness = useCallback((): { isDark: boolean; avgLuminance: number } => {
@@ -1280,14 +1197,13 @@ export default function ScannerApp() {
         return { isDark, avgLuminance };
     }, []);
 
-    // ── Camera Polling for Darkness (Scan Mode & Gesture Refresh/Reset) ──────
+    // ── Camera Polling for Darkness (Scan Mode Gesture) ───────────────────────
     useEffect(() => {
         if (!mounted || imageSolveMode || scanStatus === "scanning" || cameraError) {
             darknessStartTimeRef.current = null;
             abortedDueToLongDarknessRef.current = false;
             countdownTriggeredByDarknessRef.current = false;
-            isRefreshArmedRef.current = false;
-            consecutiveLightTicksRef.current = 0;
+            lightTicksRef.current = 0;
             setDarknessDuration(0);
             return;
         }
@@ -1297,20 +1213,9 @@ export default function ScannerApp() {
             const now = Date.now();
 
             if (isDark) {
-                consecutiveLightTicksRef.current = 0;
-            } else {
-                consecutiveLightTicksRef.current += 1;
-            }
-
-            // Sustained light (>= 400ms / 4 ticks) required to declare genuinely uncovered
-            // This grants high immunity to lighting flicker or minor hand adjustments
-            const isSustainedLight = !isDark && consecutiveLightTicksRef.current >= 4;
-
-            if (isDark) {
-                if (abortedDueToLongDarknessRef.current) return;
+                lightTicksRef.current = 0;
 
                 if (countdown !== null) {
-                    setDarknessDuration(3.5);
                     return;
                 }
 
@@ -1324,31 +1229,37 @@ export default function ScannerApp() {
                 if (elapsed >= 3.5 && !countdownTriggeredByDarknessRef.current && countdown === null) {
                     console.log("[Darkness Poller] Darkness reached 3.5s! Initiating scan countdown.");
                     countdownTriggeredByDarknessRef.current = true;
+                    darknessStartTimeRef.current = null;
+                    setDarknessDuration(0);
                     setCountdown(captureDelay);
                     setDarknessStatus("countdown");
                     setDarknessAbortMessage(null);
                 } else if (elapsed < 3.5) {
                     setDarknessStatus("covering");
                 }
-            } else if (isSustainedLight) {
-                if (abortedDueToLongDarknessRef.current) {
-                    console.log("[Darkness Poller] Camera uncovered. Sensor re-armed.");
-                    abortedDueToLongDarknessRef.current = false;
-                    setDarknessStatus("idle");
-                    setDarknessAbortMessage(null);
-                }
+            } else {
+                lightTicksRef.current += 1;
 
-                darknessStartTimeRef.current = null;
-                setDarknessDuration(0);
+                // When camera is uncovered for at least 2 ticks (200ms)
+                if (lightTicksRef.current >= 2) {
+                    if (abortedDueToLongDarknessRef.current) {
+                        abortedDueToLongDarknessRef.current = false;
+                        setDarknessStatus("idle");
+                        setDarknessAbortMessage(null);
+                    }
 
-                if (countdown === null) {
-                    setDarknessStatus("idle");
+                    darknessStartTimeRef.current = null;
+                    setDarknessDuration(0);
+
+                    if (countdown === null && darknessStatus !== "aborted") {
+                        setDarknessStatus("idle");
+                    }
                 }
             }
         }, 100);
 
         return () => clearInterval(interval);
-    }, [mounted, imageSolveMode, scanStatus, cameraError, countdown, captureDelay, checkFrameDarkness]);
+    }, [mounted, imageSolveMode, scanStatus, cameraError, countdown, captureDelay, darknessStatus, checkFrameDarkness]);
 
     // ── Countdown for scan ────────────────────────────────────────────────────
     useEffect(() => {
@@ -1359,6 +1270,8 @@ export default function ScannerApp() {
         } else if (countdown === 0) {
             setCountdown(null);
             countdownTriggeredByDarknessRef.current = false;
+            darknessStartTimeRef.current = null;
+            setDarknessDuration(0);
 
             // Check if by the time countdown ends it is STILL dark
             const { isDark } = checkFrameDarkness();
@@ -1367,13 +1280,12 @@ export default function ScannerApp() {
                 abortedDueToLongDarknessRef.current = true;
                 setDarknessStatus("aborted");
                 setDarknessAbortMessage("Scan aborted: Camera remained covered when countdown ended. Uncover camera to resume.");
-                playCancelSound();
                 return;
             }
 
             // Camera is uncovered (light detected): capture document!
             setDarknessStatus("idle");
-            playBoopSound();
+            setDarknessAbortMessage(null);
             capture(true);
         }
     }, [countdown, capture, checkFrameDarkness]);
@@ -1384,15 +1296,17 @@ export default function ScannerApp() {
         darknessStartTimeRef.current = null;
         setDarknessDuration(0);
         setDarknessStatus("idle");
-        playCancelSound();
+        setDarknessAbortMessage(null);
     }, []);
 
     const startManualScan = () => {
         if (scanStatus === "scanning" || countdown !== null) return;
         countdownTriggeredByDarknessRef.current = false;
+        darknessStartTimeRef.current = null;
+        setDarknessDuration(0);
         setCountdown(captureDelay);
         setDarknessStatus("countdown");
-        playBoopSound();
+        setDarknessAbortMessage(null);
     };
 
     // ── Image Solve: shared result apply ──────────────────────────────────────
@@ -1930,8 +1844,8 @@ export default function ScannerApp() {
             setIsProcessingSolutions(false);
         }
 
-        // Send to WhatsApp strictly after all solve/save operations have completed
-        if (newlySolvedList.length > 0) {
+        // Send to WhatsApp strictly after all solve/save operations have completed (if enabled)
+        if (sendToWhatsApp && newlySolvedList.length > 0) {
             try {
                 const whatsappPayload = newlySolvedList.map(q => ({
                     questionNumber: q.questionNumber,
@@ -1972,13 +1886,9 @@ export default function ScannerApp() {
     };
 
     const clearAllQuestions = () => {
-        stopCurrentAudio();
         fetch("/api/whatsapp/cancel", { method: "POST" }).catch(() => {});
         setSavedQuestions([]);
         setSelectedQuestionIds(new Set());
-        setActiveAudioIndex(null);
-        setAudioStatusMessage(null);
-        audioDataCacheRef.current.clear();
         setScanStatus("idle");
         syncClearServerQuestions();
     };
@@ -2566,105 +2476,45 @@ export default function ScannerApp() {
             {isSettingsOpen && (
                 <div className="settings-overlay" onClick={() => {
                     setIsSettingsOpen(false);
-                    syncPromptsToServer(customSolvePrompt, customTranscribePrompt);
+                    syncPromptsToServer(customSolvePrompt);
                 }}>
                     <div className="settings-modal" style={{ maxWidth: "640px", maxHeight: "88vh" }} onClick={e => e.stopPropagation()}>
                         <div className="settings-header">
                             <h3>Settings & Prompt Rules</h3>
                             <button className="close-btn" onClick={() => {
                                 setIsSettingsOpen(false);
-                                syncPromptsToServer(customSolvePrompt, customTranscribePrompt);
+                                syncPromptsToServer(customSolvePrompt);
                             }}>✕</button>
                         </div>
 
-                        {/* Prompt Selector Tabs */}
-                        <div style={{ display: "flex", gap: "0.5rem", padding: "1rem 1.5rem 0", borderBottom: "1px solid hsla(0, 0%, 100%, 0.1)" }}>
-                            <button
-                                className={`tab-btn ${settingsTab === "solve" ? "active" : ""}`}
-                                onClick={() => setSettingsTab("solve")}
-                                style={{ flex: 1, padding: "0.5rem 0.75rem", borderRadius: "8px 8px 0 0", fontWeight: 600, fontSize: "0.85rem" }}
-                            >
-                                📝 AI Solve Prompt
-                            </button>
-                            <button
-                                className={`tab-btn ${settingsTab === "transcribe" ? "active" : ""}`}
-                                onClick={() => setSettingsTab("transcribe")}
-                                style={{ flex: 1, padding: "0.5rem 0.75rem", borderRadius: "8px 8px 0 0", fontWeight: 600, fontSize: "0.85rem" }}
-                            >
-                                🎙️ Transcribe Rules
-                            </button>
-                        </div>
-
                         <div className="settings-content" style={{ overflowY: "auto", flex: 1, padding: "1.25rem 1.5rem" }}>
-                            {settingsTab === "solve" ? (
-                                <>
-                                    <label className="settings-label">
-                                        AI Solve System Prompt
-                                        <span className="settings-hint">
-                                            Defines how AI models solve the scanned questions. JSON formatting instructions are appended automatically. Synced across all connected devices.
-                                        </span>
-                                    </label>
-                                    <textarea
-                                        className="settings-textarea"
-                                        style={{ minHeight: "260px", fontFamily: "monospace", fontSize: "0.85rem", lineHeight: "1.4" }}
-                                        value={customSolvePrompt}
-                                        onChange={(e) => setCustomSolvePrompt(e.target.value)}
-                                        placeholder={defaultSolvePrompt}
-                                    />
-                                    <div className="settings-actions">
-                                        <button className="reset-btn" onClick={() => {
-                                            setCustomSolvePrompt(defaultSolvePrompt);
-                                            syncPromptsToServer(defaultSolvePrompt, customTranscribePrompt);
-                                        }}>
-                                            Reset Default
-                                        </button>
-                                        <button className="process-btn" onClick={() => {
-                                            setIsSettingsOpen(false);
-                                            syncPromptsToServer(customSolvePrompt, customTranscribePrompt);
-                                        }}>
-                                            Done
-                                        </button>
-                                    </div>
-                                </>
-                            ) : (
-                                <>
-                                    <label className="settings-label">
-                                        Transcript Solution Encoder Rules (TTS Prompt)
-                                        <span className="settings-hint">
-                                            Define the exact rules and guidelines used by the AI to convert written solutions into spoken dictation. Synced across all connected devices.
-                                        </span>
-                                    </label>
-                                    <textarea
-                                        className="settings-textarea"
-                                        style={{ minHeight: "300px", fontFamily: "monospace", fontSize: "0.82rem", lineHeight: "1.4" }}
-                                        value={customTranscribePrompt}
-                                        onChange={(e) => {
-                                            const val = e.target.value;
-                                            setCustomTranscribePrompt(val);
-                                            audioDataCacheRef.current.clear();
-                                        }}
-                                        placeholder={defaultTranscribePrompt}
-                                    />
-                                    <div className="settings-actions">
-                                        <button
-                                            className="reset-btn"
-                                            onClick={() => {
-                                                setCustomTranscribePrompt(defaultTranscribePrompt);
-                                                audioDataCacheRef.current.clear();
-                                                syncPromptsToServer(customSolvePrompt, defaultTranscribePrompt);
-                                            }}
-                                        >
-                                            Reset Default
-                                        </button>
-                                        <button className="process-btn" onClick={() => {
-                                            setIsSettingsOpen(false);
-                                            syncPromptsToServer(customSolvePrompt, customTranscribePrompt);
-                                        }}>
-                                            Done
-                                        </button>
-                                    </div>
-                                </>
-                            )}
+                            <label className="settings-label">
+                                AI Solve System Prompt
+                                <span className="settings-hint">
+                                    Defines how AI models solve the scanned questions. JSON formatting instructions are appended automatically. Synced across all connected devices.
+                                </span>
+                            </label>
+                            <textarea
+                                className="settings-textarea"
+                                style={{ minHeight: "280px", fontFamily: "monospace", fontSize: "0.85rem", lineHeight: "1.4" }}
+                                value={customSolvePrompt}
+                                onChange={(e) => setCustomSolvePrompt(e.target.value)}
+                                placeholder={defaultSolvePrompt}
+                            />
+                            <div className="settings-actions">
+                                <button className="reset-btn" onClick={() => {
+                                    setCustomSolvePrompt(defaultSolvePrompt);
+                                    syncPromptsToServer(defaultSolvePrompt);
+                                }}>
+                                    Reset Default
+                                </button>
+                                <button className="process-btn" onClick={() => {
+                                    setIsSettingsOpen(false);
+                                    syncPromptsToServer(customSolvePrompt);
+                                }}>
+                                    Done
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -2799,77 +2649,6 @@ export default function ScannerApp() {
                     </div>
                 )}
 
-                {/* Spoken Audio Playback Banner */}
-                {bottomTab === "questions" && savedQuestions.some(q => !!q.solution) && (() => {
-                    const solvedList = savedQuestions.filter(q => !!q.solution);
-                    const currentIdx = activeAudioIndex !== null ? activeAudioIndex : 0;
-                    const activeQ = solvedList[currentIdx] || solvedList[0];
-
-                    return (
-                        <div className="audio-playback-banner">
-                            <div className="audio-player-header">
-                                <div className="audio-player-title">
-                                    <span className="audio-pulse-icon">📖</span>
-                                    <span>Question {activeQ?.questionNumber || currentIdx + 1} of {solvedList.length} (Silent Mode)</span>
-                                </div>
-                                <div style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
-                                    <span className="audio-loop-badge" style={{ background: "hsla(200, 70%, 40%, 0.25)", color: "hsl(200, 80%, 65%)", borderColor: "hsla(200, 70%, 40%, 0.4)" }}>
-                                        📚 Multi-Batch Sync
-                                    </span>
-                                    <span className="audio-loop-badge" style={{ background: "hsla(140, 70%, 40%, 0.2)", color: "hsl(140, 80%, 65%)", borderColor: "hsla(140, 70%, 40%, 0.35)" }}>
-                                        💬 WhatsApp: 120ch (Direct)
-                                    </span>
-                                    <span className="audio-loop-badge" style={{ background: "hsla(0, 0%, 30%, 0.3)", color: "hsl(0, 0%, 75%)", borderColor: "hsla(0, 0%, 40%, 0.4)" }}>
-                                        🔇 Audio Muted
-                                    </span>
-                                </div>
-                            </div>
-
-                            {/* Question navigation controls */}
-                            <div className="audio-player-controls">
-                                <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap", alignItems: "center" }}>
-                                    <button
-                                        type="button"
-                                        className="audio-ctrl-btn"
-                                        onClick={cyclePrevSolution}
-                                        title="Previous Question"
-                                    >
-                                        ⏮️ Prev
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="audio-ctrl-btn primary"
-                                        onClick={cycleNextSolution}
-                                        title="Next Question"
-                                    >
-                                        Next Question ⏭️
-                                    </button>
-                                </div>
-
-                                <button
-                                    type="button"
-                                    className="audio-ctrl-btn danger"
-                                    onClick={clearAllQuestions}
-                                    title="Clear all questions"
-                                >
-                                    🗑️ Clear All
-                                </button>
-                            </div>
-
-                            <div className="audio-gesture-guide">
-                                <span>📸 <strong>Scan More:</strong> Cover camera 3.5s to capture additional problems</span>
-                                <span>🗑️ <strong>Clear:</strong> Use 🗑️ Clear All or ✕ on individual cards</span>
-                            </div>
-
-                            {audioStatusMessage && (
-                                <div style={{ fontSize: "0.75rem", color: "hsl(var(--accent-secondary))", opacity: 0.9 }}>
-                                    {audioStatusMessage}
-                                </div>
-                            )}
-                        </div>
-                    );
-                })()}
-
                 {bottomTab === "questions" && savedQuestions.length > 0 && (
                     <div className="questions-header-bar">
                         <div className="tabs-container" style={{ marginBottom: 0 }}>
@@ -2894,6 +2673,22 @@ export default function ScannerApp() {
                         </div>
 
                         <div className="questions-toolbar-actions">
+                            <button
+                                type="button"
+                                className={`whatsapp-toggle-btn ${sendToWhatsApp ? "enabled" : "disabled"}`}
+                                onClick={() => {
+                                    setSendToWhatsApp(prev => {
+                                        const next = !prev;
+                                        localStorage.setItem("scannerApp_sendToWhatsApp", String(next));
+                                        return next;
+                                    });
+                                }}
+                                title={sendToWhatsApp ? "WhatsApp forwarding is ON" : "WhatsApp forwarding is OFF"}
+                            >
+                                <span className="toggle-dot" />
+                                <span>WhatsApp: {sendToWhatsApp ? "ON" : "OFF"}</span>
+                            </button>
+
                             {savedQuestions.some(q => !!q.solution) && (
                                 <>
                                     <button
@@ -2914,6 +2709,16 @@ export default function ScannerApp() {
                                     </button>
                                 </>
                             )}
+
+                            <button
+                                type="button"
+                                className="toolbar-action-btn danger"
+                                onClick={clearAllQuestions}
+                                title="Clear all questions"
+                            >
+                                🗑️ Clear All
+                            </button>
+
                             <div
                                 className={`sync-status-badge ${syncStatus}`}
                                 title={syncStatus === "synced" ? "Synced with server & other devices" : syncStatus === "syncing" ? "Syncing changes..." : "Server offline"}
@@ -2956,9 +2761,6 @@ export default function ScannerApp() {
                     {filteredQuestions.length > 0 && (
                         <div className="questions-list">
                             {filteredQuestions.map((q, idx) => {
-                                const solvedList = savedQuestions.filter(sq => !!sq.solution);
-                                const isCurrentFocus = activeAudioIndex !== null && solvedList[activeAudioIndex]?.id === q.id;
-
                                 return (
                                 <div
                                     key={q.id || idx}
@@ -2966,7 +2768,7 @@ export default function ScannerApp() {
                                         if (el) questionCardRefs.current.set(q.id, el);
                                         else questionCardRefs.current.delete(q.id);
                                     }}
-                                    className={`question-card ${selectedQuestionIds.has(q.id) ? 'selected' : ''} ${isCurrentFocus ? 'active-focus-card' : ''}`}
+                                    className={`question-card ${selectedQuestionIds.has(q.id) ? 'selected' : ''}`}
                                     onClick={() => handleCardClick(q.id, !!q.solution)}
                                     onPointerDown={(e) => {
                                         if ((e.target as HTMLElement).tagName.toLowerCase() !== 'input' && editingId !== q.id) {
@@ -2989,9 +2791,6 @@ export default function ScannerApp() {
                                                 onClick={(e) => e.stopPropagation()}
                                             />
                                             <span className="question-number">Question {q.questionNumber}</span>
-                                            {isCurrentFocus && (
-                                                <span className="active-question-pill">🎯 Focus</span>
-                                            )}
                                         </div>
                                         <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
                                             {q.solution && (
@@ -3048,17 +2847,9 @@ export default function ScannerApp() {
                                                     <span>Generating answer...</span>
                                                 </div>
                                             ) : expandedSolutionIds.has(q.id) && (
-                                                <>
-                                                    <div className="solution-text">
-                                                        {renderFormattedSolution(q.solution)}
-                                                    </div>
-                                                    <div className="question-transcript-box">
-                                                        <div className="question-transcript-header">
-                                                            <span>🎙️ Spoken Transcript</span>
-                                                        </div>
-                                                        <div style={{ fontWeight: 600, letterSpacing: "0.05em", color: "hsl(var(--accent-secondary))" }}>SAMPLE</div>
-                                                    </div>
-                                                </>
+                                                <div className="solution-text">
+                                                    {renderFormattedSolution(q.solution)}
+                                                </div>
                                             )}
                                         </div>
                                     )}
