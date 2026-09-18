@@ -118,40 +118,13 @@ const formatBytes = (bytes: number) => {
     return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 };
 
-const saveCaptureToLocalGallery = (dataUrl: string, prefix = "intelliscan") => {
-    try {
-        if (!dataUrl || typeof window === "undefined") return;
-        const commaIdx = dataUrl.indexOf(",");
-        if (commaIdx === -1) return;
-        const meta = dataUrl.slice(0, commaIdx);
-        const base64Data = dataUrl.slice(commaIdx + 1).replace(/\s/g, "");
-        const mimeMatch = meta.match(/:(.*?);/);
-        const mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
-        const byteCharacters = atob(base64Data);
-        const byteArray = new Uint8Array(byteCharacters.length);
-        for (let i = 0; i < byteCharacters.length; i++) {
-            byteArray[i] = byteCharacters.charCodeAt(i);
-        }
-        const blob = new Blob([byteArray], { type: mimeType });
-        const now = new Date();
-        const pad = (n: number) => String(n).padStart(2, "0");
-        const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-        const ext = mimeType.includes("png") ? "png" : "jpg";
-        const filename = `${prefix}_${timestamp}.${ext}`;
-        const blobUrl = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = blobUrl;
-        link.download = filename;
-        link.style.display = "none";
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
-        console.log(`[Gallery] Saved capture to device gallery: ${filename}`);
-    } catch (err) {
-        console.warn("[Gallery] Failed to save capture to local gallery:", err);
-    }
-};
+interface SyncedCapture {
+    id: string;
+    createdAt: number;
+    type: "scan" | "solve";
+    imageData: string;
+    metadata?: Record<string, any>;
+}
 
 const getProviderLabel = (provider: string | null | undefined) => {
     if (provider === "deepseek") return "DeepSeek";
@@ -653,13 +626,17 @@ export default function ScannerApp() {
     const [isProcessingSolutions, setIsProcessingSolutions] = useState(false);
     const [expandedSolutionIds, setExpandedSolutionIds] = useState<Set<string>>(new Set());
     const [activeTab, setActiveTab] = useState<"all" | "unsolved" | "solved">("all");
-    const [bottomTab, setBottomTab] = useState<"questions" | "imagesolve">("questions");
+    const [bottomTab, setBottomTab] = useState<"questions" | "captures" | "imagesolve">("questions");
+
+    // ── Synced Captures State ──────────────────────────────────────────────────
+    const [syncedCaptures, setSyncedCaptures] = useState<SyncedCapture[]>([]);
+    const [capturesLoading, setCapturesLoading] = useState(false);
+    const [capturesSyncStatus, setCapturesSyncStatus] = useState<"synced" | "syncing" | "offline">("synced");
+    const [activeCaptureModal, setActiveCaptureModal] = useState<SyncedCapture | null>(null);
+    const [capturesFilter, setCapturesFilter] = useState<"all" | "scan" | "solve">("all");
 
     // ── WhatsApp & Settings ───────────────────────────────────────────────────
     const [sendToWhatsApp, setSendToWhatsApp] = useState<boolean>(true);
-    const [saveToGallery, setSaveToGallery] = useState<boolean>(false);
-    const saveToGalleryRef = useRef(saveToGallery);
-    saveToGalleryRef.current = saveToGallery;
     const defaultSolvePrompt = DEFAULT_SOLVE_PROMPT;
     const [customSolvePrompt, setCustomSolvePrompt] = useState(DEFAULT_SOLVE_PROMPT);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -776,9 +753,6 @@ export default function ScannerApp() {
         const storedWhatsApp = localStorage.getItem("scannerApp_sendToWhatsApp");
         if (storedWhatsApp !== null) setSendToWhatsApp(storedWhatsApp === "true");
 
-        const storedSaveToGallery = localStorage.getItem("scannerApp_saveToGallery");
-        if (storedSaveToGallery !== null) setSaveToGallery(storedSaveToGallery === "true");
-
         const storedOrder = localStorage.getItem("scannerApp_imageSolveProviderOrder");
         if (storedOrder) {
             try {
@@ -816,11 +790,10 @@ export default function ScannerApp() {
             localStorage.setItem("scannerApp_savedQuestions", JSON.stringify(savedQuestions));
             localStorage.setItem("scannerApp_solvePrompt", customSolvePrompt);
             localStorage.setItem("scannerApp_sendToWhatsApp", String(sendToWhatsApp));
-            localStorage.setItem("scannerApp_saveToGallery", String(saveToGallery));
             localStorage.setItem("scannerApp_imageSolveProviderOrder", JSON.stringify(imageSolveProviderOrder));
             localStorage.setItem("scannerApp_imageSolveProviderEnabled", JSON.stringify(imageSolveProviderEnabled));
         }
-    }, [savedQuestions, customSolvePrompt, sendToWhatsApp, saveToGallery, imageSolveProviderOrder, imageSolveProviderEnabled, isLoaded]);
+    }, [savedQuestions, customSolvePrompt, sendToWhatsApp, imageSolveProviderOrder, imageSolveProviderEnabled, isLoaded]);
 
     // ── Server Sync Functions ─────────────────────────────────────────────────
     const syncQuestionsToServer = useCallback(async (questions: ScannedQuestion[]) => {
@@ -959,6 +932,104 @@ export default function ScannerApp() {
             isMounted = false;
             clearInterval(interval);
         };
+    }, []);
+
+    // ── Captures Sync Functions ───────────────────────────────────────────────
+    const pollServerCaptures = useCallback(async () => {
+        try {
+            const res = await fetch(`/api/captures?limit=60&_t=${Date.now()}`, {
+                cache: "no-store",
+                headers: {
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                },
+            });
+            if (res.ok) {
+                const data = await res.json();
+                if (Array.isArray(data.captures)) {
+                    setSyncedCaptures(data.captures);
+                    setCapturesSyncStatus("synced");
+                }
+            } else {
+                setCapturesSyncStatus("offline");
+            }
+        } catch {
+            setCapturesSyncStatus("offline");
+        }
+    }, []);
+
+    useEffect(() => {
+        pollServerCaptures();
+        const interval = setInterval(pollServerCaptures, 2500);
+        return () => clearInterval(interval);
+    }, [pollServerCaptures]);
+
+    const uploadCaptureToServer = useCallback(async (imageData: string, type: "scan" | "solve", metadata?: any) => {
+        try {
+            const tempId = `cap_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+            const optimisticCapture: SyncedCapture = {
+                id: tempId,
+                createdAt: Date.now(),
+                type,
+                imageData,
+                metadata,
+            };
+            setSyncedCaptures(prev => [optimisticCapture, ...prev.filter(c => c.id !== tempId)]);
+            setCapturesSyncStatus("syncing");
+
+            const res = await fetch("/api/captures", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ id: tempId, type, imageData, metadata }),
+            });
+            if (res.ok) {
+                const data = await res.json();
+                if (data?.capture) {
+                    setSyncedCaptures(prev => [data.capture, ...prev.filter(c => c.id !== tempId && c.id !== data.capture.id)]);
+                }
+                setCapturesSyncStatus("synced");
+            } else {
+                setCapturesSyncStatus("offline");
+            }
+        } catch (err) {
+            console.warn("[Captures] Failed to upload capture to server:", err);
+            setCapturesSyncStatus("offline");
+        }
+    }, []);
+
+    const deleteCapture = useCallback(async (id: string) => {
+        setSyncedCaptures(prev => prev.filter(c => c.id !== id));
+        if (activeCaptureModal?.id === id) setActiveCaptureModal(null);
+        try {
+            await fetch(`/api/captures?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+        } catch (e) {
+            console.warn("[Captures] Failed to delete capture:", e);
+        }
+    }, [activeCaptureModal]);
+
+    const clearAllCaptures = useCallback(async () => {
+        if (!confirm("Are you sure you want to clear all synced captures across all devices?")) return;
+        setSyncedCaptures([]);
+        setActiveCaptureModal(null);
+        try {
+            await fetch("/api/captures", { method: "DELETE" });
+        } catch (e) {
+            console.warn("[Captures] Failed to clear captures:", e);
+        }
+    }, []);
+
+    const downloadCaptureImage = useCallback((capture: SyncedCapture) => {
+        try {
+            const link = document.createElement("a");
+            link.href = capture.imageData;
+            link.download = `capture_${capture.type}_${capture.id}.jpg`;
+            link.style.display = "none";
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        } catch (e) {
+            console.warn("[Captures] Download failed:", e);
+        }
     }, []);
 
     const copyQuestionAndSolution = useCallback((q: ScannedQuestion, e: React.MouseEvent) => {
@@ -1303,9 +1374,8 @@ export default function ScannerApp() {
             return;
         }
 
-        if (saveToGalleryRef.current && base64Image) {
-            saveCaptureToLocalGallery(base64Image, "scan_capture");
-        }
+        // Sync capture across all devices
+        uploadCaptureToServer(base64Image, "scan");
 
         try {
             const resolution = getCaptureResolution();
@@ -1364,7 +1434,65 @@ export default function ScannerApp() {
             setScanStatus("error");
             setErrorMessage(getErrorMessage(error, "Failed to process the question paper."));
         }
-    }, [captureHighQualityFrame, autoSolveQuestions, syncQuestionsToServer]);
+    }, [captureHighQualityFrame, autoSolveQuestions, syncQuestionsToServer, uploadCaptureToServer]);
+
+    // ── Re-scan from synced capture ───────────────────────────────────────────
+    const reScanCapture = useCallback(async (captureItem: SyncedCapture) => {
+        setBottomTab("questions");
+        setIsCapturing(true);
+        setScanStatus("scanning");
+        setErrorMessage("");
+
+        setTimeout(() => setIsCapturing(false), 500);
+
+        try {
+            const response = await fetch("/api/scan", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ image: captureItem.imageData }),
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || `API returned ${response.status}`);
+            }
+
+            const data = await response.json();
+            const rawQuestions = data.questions || [];
+            if (rawQuestions.length === 0) {
+                setScanStatus("error");
+                setErrorMessage("No questions detected in this captured image.");
+                return;
+            }
+
+            const existingQuestions = savedQuestionsRef.current;
+            const existingCount = existingQuestions.length;
+
+            const assignedQuestions: ScannedQuestion[] = rawQuestions.map((newQ: any, idx: number) => {
+                const questionNum = newQ.questionNumber && !existingQuestions.some(eq => eq.questionNumber === newQ.questionNumber)
+                    ? newQ.questionNumber
+                    : String(existingCount + idx + 1);
+
+                return {
+                    id: newQ.id || `q-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 6)}`,
+                    questionNumber: questionNum,
+                    text: newQ.text || "",
+                    isSolving: true,
+                    createdAt: Date.now(),
+                };
+            });
+
+            const cumulativeQuestions = [...existingQuestions, ...assignedQuestions];
+            setSavedQuestions(cumulativeQuestions);
+            setScanStatus("success");
+            syncQuestionsToServer(cumulativeQuestions);
+            autoSolveQuestions(assignedQuestions);
+        } catch (error: unknown) {
+            console.error("Re-scan error:", error);
+            setScanStatus("error");
+            setErrorMessage(getErrorMessage(error, "Failed to process the captured image."));
+        }
+    }, [autoSolveQuestions, syncQuestionsToServer]);
 
     // ── Frame Darkness Detection ──────────────────────────────────────────────
     const checkFrameDarkness = useCallback((): { isDark: boolean; avgLuminance: number } => {
@@ -1608,9 +1736,8 @@ export default function ScannerApp() {
             return;
         }
 
-        if (saveToGalleryRef.current && base64Image) {
-            saveCaptureToLocalGallery(base64Image, "solve_capture");
-        }
+        // Sync capture across all devices
+        uploadCaptureToServer(base64Image, "solve");
 
         const resolution = getCaptureResolution();
         if (resolution?.width && resolution?.height) {
@@ -1746,7 +1873,7 @@ export default function ScannerApp() {
             setImageSolveError(message);
             setImageSolveStatus("error");
         }
-    }, [imageSolveStatus, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, captureHighQualityFrame]);
+    }, [imageSolveStatus, customSolvePrompt, imageSolveProviderOrder, imageSolveProviderEnabled, captureHighQualityFrame, uploadCaptureToServer]);
 
     // ── Image Solve: solve batch from images ──────────────────────────────────
     const solveBatchUploadedImages = useCallback(async (base64Images: string[]) => {
@@ -2753,38 +2880,6 @@ export default function ScannerApp() {
                                 </div>
                             </div>
 
-                            {/* Save to Device Gallery Setting */}
-                            <div className="settings-field" style={{ marginBottom: "1.5rem", paddingBottom: "1.25rem", borderBottom: "1px solid hsla(0, 0%, 100%, 0.1)" }}>
-                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                                    <div>
-                                        <div style={{ fontWeight: 600, fontSize: "0.95rem", color: "hsl(var(--text-primary))", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                                            <span>📸 Save Captures to Device Gallery</span>
-                                            <span style={{ fontSize: "0.75rem", padding: "0.15rem 0.5rem", borderRadius: "10px", background: saveToGallery ? "hsla(140, 70%, 40%, 0.2)" : "hsla(0, 0%, 40%, 0.2)", color: saveToGallery ? "hsl(140, 80%, 65%)" : "hsl(0, 0%, 65%)" }}>
-                                                {saveToGallery ? "Enabled" : "Disabled"}
-                                            </span>
-                                        </div>
-                                        <span className="settings-hint" style={{ marginTop: "0.25rem", display: "block" }}>
-                                            Automatically download and save all camera frame captures to your device&apos;s local gallery / photos.
-                                        </span>
-                                    </div>
-                                    <button
-                                        type="button"
-                                        className={`whatsapp-toggle-btn ${saveToGallery ? "enabled" : "disabled"}`}
-                                        onClick={() => {
-                                            setSaveToGallery(prev => {
-                                                const next = !prev;
-                                                localStorage.setItem("scannerApp_saveToGallery", String(next));
-                                                return next;
-                                            });
-                                        }}
-                                        style={{ padding: "0.5rem 1rem", fontSize: "0.85rem" }}
-                                    >
-                                        <span className="toggle-dot" />
-                                        <span>{saveToGallery ? "ON" : "OFF"}</span>
-                                    </button>
-                                </div>
-                            </div>
-
                             <label className="settings-label">
                                 AI Solve System Prompt
                                 <span className="settings-hint">
@@ -2828,6 +2923,12 @@ export default function ScannerApp() {
                             Questions ({savedQuestions.length})
                         </button>
                         <button
+                            className={`tab-btn ${bottomTab === "captures" ? "active" : ""}`}
+                            onClick={() => { setBottomTab("captures"); pollServerCaptures(); }}
+                        >
+                            📸 Captures ({syncedCaptures.length})
+                        </button>
+                        <button
                             className={`tab-btn ${bottomTab === "imagesolve" ? "active" : ""}`}
                             onClick={() => { setBottomTab("imagesolve"); fetchHistory(); }}
                         >
@@ -2849,6 +2950,22 @@ export default function ScannerApp() {
                         )}
                         {savedQuestions.length > 0 && (
                             <button className="reset-btn danger" onClick={clearAllQuestions}>Clear All</button>
+                        )}
+                    </div>}
+                    {bottomTab === "captures" && <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                        <span className={`sync-status-badge ${capturesSyncStatus}`} style={{ fontSize: "0.72rem" }}>
+                            <span className="sync-dot" />
+                            <span>{capturesSyncStatus === "syncing" ? "Syncing..." : capturesSyncStatus === "synced" ? "Synced" : "Offline"}</span>
+                        </span>
+                        <button
+                            className="tab-action-btn"
+                            onClick={() => pollServerCaptures()}
+                            title="Refresh Captures"
+                        >
+                            🔄 Refresh
+                        </button>
+                        {syncedCaptures.length > 0 && (
+                            <button className="reset-btn danger" onClick={clearAllCaptures}>Clear All</button>
                         )}
                     </div>}
                     {bottomTab === "imagesolve" && <div style={{ display: "flex", gap: "0.5rem" }}>
@@ -2943,6 +3060,111 @@ export default function ScannerApp() {
                                 </div>
                             );
                         })}
+                    </div>
+                )}
+
+                {bottomTab === "captures" && (
+                    <div className="captures-tab-panel">
+                        {/* Filter pills bar */}
+                        {syncedCaptures.length > 0 && (
+                            <div className="captures-filter-bar">
+                                <div className="tabs-container" style={{ marginBottom: 0 }}>
+                                    <button
+                                        className={`tab-btn ${capturesFilter === "all" ? "active" : ""}`}
+                                        onClick={() => setCapturesFilter("all")}
+                                    >
+                                        All ({syncedCaptures.length})
+                                    </button>
+                                    <button
+                                        className={`tab-btn ${capturesFilter === "scan" ? "active" : ""}`}
+                                        onClick={() => setCapturesFilter("scan")}
+                                    >
+                                        Scan Mode ({syncedCaptures.filter(c => c.type === "scan").length})
+                                    </button>
+                                    <button
+                                        className={`tab-btn ${capturesFilter === "solve" ? "active" : ""}`}
+                                        onClick={() => setCapturesFilter("solve")}
+                                    >
+                                        Solve Mode ({syncedCaptures.filter(c => c.type === "solve").length})
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {syncedCaptures.length === 0 && (
+                            <div className="empty-state">
+                                <div className="empty-icon">📸</div>
+                                <p style={{ fontWeight: 600, fontSize: "1.05rem", color: "hsl(var(--text-primary))", margin: "0.5rem 0" }}>No Captured Images Yet</p>
+                                <p style={{ fontSize: "0.85rem", color: "hsl(var(--text-secondary))", maxWidth: "340px", textAlign: "center" }}>
+                                    When you capture an image using the camera (Scan or Image Solve), it will automatically be synced here across all your connected devices in real time.
+                                </p>
+                            </div>
+                        )}
+
+                        {syncedCaptures.length > 0 && (
+                            <div className="captures-grid">
+                                {syncedCaptures
+                                    .filter(c => capturesFilter === "all" || c.type === capturesFilter)
+                                    .map(capture => (
+                                        <div key={capture.id} className="capture-card">
+                                            <div
+                                                className="capture-thumb-wrapper"
+                                                onClick={() => setActiveCaptureModal(capture)}
+                                            >
+                                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                                <img
+                                                    src={capture.imageData}
+                                                    alt={`Capture ${capture.id}`}
+                                                    className="capture-thumb-img"
+                                                    loading="lazy"
+                                                />
+                                                <div className="capture-overlay-hover">
+                                                    <span>🔍 View Large</span>
+                                                </div>
+                                                <span className={`capture-type-pill ${capture.type}`}>
+                                                    {capture.type === "scan" ? "📄 Scan" : "⚡ Solve"}
+                                                </span>
+                                            </div>
+                                            <div className="capture-card-body">
+                                                <div className="capture-meta">
+                                                    <span className="capture-time">
+                                                        {new Date(capture.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                                                    </span>
+                                                    <span className="capture-date">
+                                                        {new Date(capture.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                                                    </span>
+                                                </div>
+                                                <div className="capture-card-actions">
+                                                    <button
+                                                        type="button"
+                                                        className="capture-action-btn primary"
+                                                        onClick={() => reScanCapture(capture)}
+                                                        title="Scan questions from this image"
+                                                    >
+                                                        ⚡ Scan
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className="capture-action-btn"
+                                                        onClick={() => downloadCaptureImage(capture)}
+                                                        title="Download image"
+                                                    >
+                                                        ⬇️
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className="capture-action-btn danger"
+                                                        onClick={() => deleteCapture(capture.id)}
+                                                        title="Delete from all devices"
+                                                    >
+                                                        🗑️
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                            </div>
+                        )}
                     </div>
                 )}
 
@@ -3154,6 +3376,57 @@ export default function ScannerApp() {
                         >
                             Close
                         </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Capture Lightbox / Preview Modal */}
+            {activeCaptureModal && (
+                <div className="settings-overlay capture-modal-overlay" onClick={() => setActiveCaptureModal(null)}>
+                    <div className="capture-modal-content" onClick={e => e.stopPropagation()}>
+                        <div className="capture-modal-header">
+                            <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                                <span className={`capture-type-pill ${activeCaptureModal.type}`} style={{ position: "static" }}>
+                                    {activeCaptureModal.type === "scan" ? "📄 Scan Frame" : "⚡ Solve Frame"}
+                                </span>
+                                <span style={{ fontSize: "0.85rem", color: "hsl(var(--text-secondary))" }}>
+                                    {new Date(activeCaptureModal.createdAt).toLocaleString()}
+                                </span>
+                            </div>
+                            <button className="close-btn" onClick={() => setActiveCaptureModal(null)}>✕</button>
+                        </div>
+                        <div className="capture-modal-body">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                                src={activeCaptureModal.imageData}
+                                alt="Capture preview"
+                                className="capture-modal-img"
+                            />
+                        </div>
+                        <div className="capture-modal-footer">
+                            <button
+                                className="process-btn"
+                                onClick={() => {
+                                    const cap = activeCaptureModal;
+                                    setActiveCaptureModal(null);
+                                    reScanCapture(cap);
+                                }}
+                            >
+                                ⚡ Scan Questions from Image
+                            </button>
+                            <button
+                                className="tab-action-btn"
+                                onClick={() => downloadCaptureImage(activeCaptureModal)}
+                            >
+                                ⬇️ Download
+                            </button>
+                            <button
+                                className="reset-btn danger"
+                                onClick={() => deleteCapture(activeCaptureModal.id)}
+                            >
+                                🗑️ Delete Everywhere
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}
