@@ -118,6 +118,41 @@ const formatBytes = (bytes: number) => {
     return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 };
 
+const saveCaptureToLocalGallery = (dataUrl: string, prefix = "intelliscan") => {
+    try {
+        if (!dataUrl || typeof window === "undefined") return;
+        const commaIdx = dataUrl.indexOf(",");
+        if (commaIdx === -1) return;
+        const meta = dataUrl.slice(0, commaIdx);
+        const base64Data = dataUrl.slice(commaIdx + 1).replace(/\s/g, "");
+        const mimeMatch = meta.match(/:(.*?);/);
+        const mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
+        const byteCharacters = atob(base64Data);
+        const byteArray = new Uint8Array(byteCharacters.length);
+        for (let i = 0; i < byteCharacters.length; i++) {
+            byteArray[i] = byteCharacters.charCodeAt(i);
+        }
+        const blob = new Blob([byteArray], { type: mimeType });
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, "0");
+        const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+        const ext = mimeType.includes("png") ? "png" : "jpg";
+        const filename = `${prefix}_${timestamp}.${ext}`;
+        const blobUrl = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = blobUrl;
+        link.download = filename;
+        link.style.display = "none";
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+        console.log(`[Gallery] Saved capture to device gallery: ${filename}`);
+    } catch (err) {
+        console.warn("[Gallery] Failed to save capture to local gallery:", err);
+    }
+};
+
 const getProviderLabel = (provider: string | null | undefined) => {
     if (provider === "deepseek") return "DeepSeek";
     if (provider === "gemini") return "Gemini";
@@ -622,6 +657,9 @@ export default function ScannerApp() {
 
     // ── WhatsApp & Settings ───────────────────────────────────────────────────
     const [sendToWhatsApp, setSendToWhatsApp] = useState<boolean>(true);
+    const [saveToGallery, setSaveToGallery] = useState<boolean>(false);
+    const saveToGalleryRef = useRef(saveToGallery);
+    saveToGalleryRef.current = saveToGallery;
     const defaultSolvePrompt = DEFAULT_SOLVE_PROMPT;
     const [customSolvePrompt, setCustomSolvePrompt] = useState(DEFAULT_SOLVE_PROMPT);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -738,6 +776,9 @@ export default function ScannerApp() {
         const storedWhatsApp = localStorage.getItem("scannerApp_sendToWhatsApp");
         if (storedWhatsApp !== null) setSendToWhatsApp(storedWhatsApp === "true");
 
+        const storedSaveToGallery = localStorage.getItem("scannerApp_saveToGallery");
+        if (storedSaveToGallery !== null) setSaveToGallery(storedSaveToGallery === "true");
+
         const storedOrder = localStorage.getItem("scannerApp_imageSolveProviderOrder");
         if (storedOrder) {
             try {
@@ -775,10 +816,11 @@ export default function ScannerApp() {
             localStorage.setItem("scannerApp_savedQuestions", JSON.stringify(savedQuestions));
             localStorage.setItem("scannerApp_solvePrompt", customSolvePrompt);
             localStorage.setItem("scannerApp_sendToWhatsApp", String(sendToWhatsApp));
+            localStorage.setItem("scannerApp_saveToGallery", String(saveToGallery));
             localStorage.setItem("scannerApp_imageSolveProviderOrder", JSON.stringify(imageSolveProviderOrder));
             localStorage.setItem("scannerApp_imageSolveProviderEnabled", JSON.stringify(imageSolveProviderEnabled));
         }
-    }, [savedQuestions, customSolvePrompt, sendToWhatsApp, imageSolveProviderOrder, imageSolveProviderEnabled, isLoaded]);
+    }, [savedQuestions, customSolvePrompt, sendToWhatsApp, saveToGallery, imageSolveProviderOrder, imageSolveProviderEnabled, isLoaded]);
 
     // ── Server Sync Functions ─────────────────────────────────────────────────
     const syncQuestionsToServer = useCallback(async (questions: ScannedQuestion[]) => {
@@ -1261,6 +1303,10 @@ export default function ScannerApp() {
             return;
         }
 
+        if (saveToGalleryRef.current && base64Image) {
+            saveCaptureToLocalGallery(base64Image, "scan_capture");
+        }
+
         try {
             const resolution = getCaptureResolution();
             if (resolution?.width && resolution?.height) {
@@ -1560,6 +1606,10 @@ export default function ScannerApp() {
             setImageSolveStatus("error");
             setImageSolveError("Captured image was not a valid base64 image data URL.");
             return;
+        }
+
+        if (saveToGalleryRef.current && base64Image) {
+            saveCaptureToLocalGallery(base64Image, "solve_capture");
         }
 
         const resolution = getCaptureResolution();
@@ -2699,6 +2749,38 @@ export default function ScannerApp() {
                                     >
                                         <span className="toggle-dot" />
                                         <span>{sendToWhatsApp ? "ON" : "OFF"}</span>
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Save to Device Gallery Setting */}
+                            <div className="settings-field" style={{ marginBottom: "1.5rem", paddingBottom: "1.25rem", borderBottom: "1px solid hsla(0, 0%, 100%, 0.1)" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                    <div>
+                                        <div style={{ fontWeight: 600, fontSize: "0.95rem", color: "hsl(var(--text-primary))", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                            <span>📸 Save Captures to Device Gallery</span>
+                                            <span style={{ fontSize: "0.75rem", padding: "0.15rem 0.5rem", borderRadius: "10px", background: saveToGallery ? "hsla(140, 70%, 40%, 0.2)" : "hsla(0, 0%, 40%, 0.2)", color: saveToGallery ? "hsl(140, 80%, 65%)" : "hsl(0, 0%, 65%)" }}>
+                                                {saveToGallery ? "Enabled" : "Disabled"}
+                                            </span>
+                                        </div>
+                                        <span className="settings-hint" style={{ marginTop: "0.25rem", display: "block" }}>
+                                            Automatically download and save all camera frame captures to your device&apos;s local gallery / photos.
+                                        </span>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        className={`whatsapp-toggle-btn ${saveToGallery ? "enabled" : "disabled"}`}
+                                        onClick={() => {
+                                            setSaveToGallery(prev => {
+                                                const next = !prev;
+                                                localStorage.setItem("scannerApp_saveToGallery", String(next));
+                                                return next;
+                                            });
+                                        }}
+                                        style={{ padding: "0.5rem 1rem", fontSize: "0.85rem" }}
+                                    >
+                                        <span className="toggle-dot" />
+                                        <span>{saveToGallery ? "ON" : "OFF"}</span>
                                     </button>
                                 </div>
                             </div>
